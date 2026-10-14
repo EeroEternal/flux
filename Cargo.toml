@@ -1,0 +1,32 @@
+[package]
+name = "flux"
+version = "0.0.1"
+edition = "2021"
+description = "Flux: a streaming-first AI load balancer"
+license = "MIT"
+
+[lib]
+name = "flux"
+path = "src/lib.rs"
+
+[[bin]]
+name = "flux"
+path = "src/main.rs"
+
+[dependencies]
+tokio = { version = "1.40", features = ["rt-multi-thread", "macros", "net", "io-util", "time", "signal", "sync"] }
+serde = { version = "1", features = ["derive"] }
+toml = "0.8"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt", "json"] }
+prometheus = "0.13"
+socket2 = { version = "0.5", features = ["all"] }
+httparse = "1"
+anyhow = "1"
+tokio-rustls = { version = "0.26", default-features = false, features = ["ring", "tls12", "logging"] }
+rustls-pemfile = "2"
+
+[dev-dependencies]
+tokio = { version = "1", features = ["full"] }
+tokio-rustls = { version = "0.26", default-features = false, features = ["ring", "tls12", "logging"] }
+rustls-pemfile = "2"

@@ -1,0 +1,49 @@
+# Flux configuration.
+
+[server]
+bind = "0.0.0.0:8006"
+mode = "l4"                    # l4 | thin-l7
+max_connections = 100000
+tcp_nodelay = true
+reuseport = false
+max_header_bytes = 65536       # thin-l7 only
+
+# Optional TLS termination for client connections. When enabled, clients speak
+# HTTPS to Flux; Flux still forwards plaintext HTTP to the gateways.
+# [server.tls]
+# enabled = false
+# cert = "/etc/flux/tls/fullchain.pem"
+# key = "/etc/flux/tls/privkey.pem"
+
+[timeouts]
+connect = "5s"
+idle = "600s"
+total = "3600s"
+fin = "30s"
+
+[pool]
+max_idle_per_backend = 64
+idle_timeout = "60s"
+
+[backends]
+algorithm = "leastconn"        # leastconn | roundrobin
+health_check_path = "/health"
+health_interval = "2s"
+health_check_timeout = "2s"
+unhealthy_threshold = 2
+healthy_threshold = 2
+
+[[backends.servers]]
+addr = "10.56.88.32:8001"
+weight = 1
+
+[[backends.servers]]
+addr = "10.56.88.33:8002"
+weight = 1
+
+[retry]
+max_retries = 0                # only applies to connection establishment
+
+[metrics]
+enabled = true
+bind = "0.0.0.0:9106"
