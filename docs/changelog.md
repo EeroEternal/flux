@@ -10,6 +10,8 @@ Write bullets that a human can ship from: **what changed**, **who it affects**,
 
 ## [Unreleased]
 
+## [0.0.1] - 2026-10-14
+
 ### Added
 
 - **L4 forwarding** (`mode = "l4"`, default): pure TCP splice built on
