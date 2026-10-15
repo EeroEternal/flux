@@ -1,8 +1,8 @@
 # Engineering hard rules
 
-This file adapts the console-kit engineering rules to Flux. Rules whose original
+This file adapts the console-kit engineering rules to xFlux. Rules whose original
 motivation was database/UI specific are dropped; the universal ones are kept and
-extended with Flux's streaming constraints.
+extended with xFlux's streaming constraints.
 
 ## 一、禁止夹带变更（Silent Drift）
 
@@ -74,9 +74,9 @@ extended with Flux's streaming constraints.
 
 ---
 
-## 七、流式内核不变量（Flux 专属，最高优先级）
+## 七、流式内核不变量（xFlux 专属，最高优先级）
 
-以下四条是 Flux 的正确性底线，任何改动都必须保持：
+以下四条是 xFlux 的正确性底线，任何改动都必须保持：
 
 1. **零缓冲**：`forward_body` 每次只持有一个有界 read；L4 用
    `copy_bidirectional`。不得引入任何聚合/解码中间层。
@@ -101,7 +101,7 @@ extended with Flux's streaming constraints.
 
 ## 九、负载均衡边界（HAProxy 位，禁止滑向网关）
 
-Flux 的产品位是长流前面的 HAProxy，不是推理网关。审查热路径时用这一条判越界：
+xFlux 的产品位是长流前面的 HAProxy，不是推理网关。审查热路径时用这一条判越界：
 
 > **只碰为了「选谁、能否还池、何时断开」所必需的帧；永远不碰 payload 语义。**
 
