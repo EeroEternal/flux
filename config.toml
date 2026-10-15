@@ -35,6 +35,8 @@ health_interval = "2s"
 health_check_timeout = "2s"
 unhealthy_threshold = 2
 healthy_threshold = 2
+# passive_unhealthy_threshold = 0  # 0 = disabled; positive ejects backend after N consecutive TCP dial failures
+# eject_cooldown = "5s"            # cooldown before passively ejected backend is re-admitted
 
 [[backends.servers]]
 addr = "10.56.88.32:8001"

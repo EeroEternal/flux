@@ -1329,3 +1329,147 @@ weight = 1
     assert_eq!(conns.load(Ordering::SeqCst), 1);
     server.stop().await;
 }
+
+#[tokio::test]
+async fn thin_l7_recovers_from_stale_pooled_keepalive_close() {
+    let conns = Arc::new(AtomicUsize::new(0));
+    let conn_seq = Arc::new(AtomicUsize::new(0));
+    let handler: Handler = {
+        let conn_seq = conn_seq.clone();
+        Arc::new(move |mut socket| {
+            let which_conn = conn_seq.fetch_add(1, Ordering::SeqCst);
+            Box::pin(async move {
+                let mut buf = Vec::new();
+                if which_conn == 0 {
+                    // First connection: serve the first request with keep-alive,
+                    // then wait until the second request arrives on this pooled
+                    // socket and immediately close without sending a single byte
+                    // (simulating an HTTP/1.1 keep-alive timeout race).
+                    let head = match read_http_head(&mut socket, &mut buf).await {
+                        Some(h) => h,
+                        None => return,
+                    };
+                    drain_fixed_body(&mut socket, &mut buf, &head).await;
+                    let _ = socket
+                        .write_all(
+                            b"HTTP/1.1 200 OK\r\nContent-Length: 5\r\nConnection: keep-alive\r\n\r\nfirst",
+                        )
+                        .await;
+                    let _ = read_http_head(&mut socket, &mut buf).await;
+                    let _ = socket.shutdown().await;
+                } else {
+                    // Freshly redialed connection: serve the replayed request.
+                    let head = match read_http_head(&mut socket, &mut buf).await {
+                        Some(h) => h,
+                        None => return,
+                    };
+                    drain_fixed_body(&mut socket, &mut buf, &head).await;
+                    let _ = socket
+                        .write_all(
+                            b"HTTP/1.1 200 OK\r\nContent-Length: 6\r\nConnection: keep-alive\r\n\r\nsecond",
+                        )
+                        .await;
+                }
+            })
+        })
+    };
+    let backend = spawn_backend(handler, conns.clone()).await;
+    let server = start_xflux("thin-l7", &[backend]).await;
+
+    let mut client = TestClient::connect(server.addr).await;
+    client
+        .send(b"POST /v1/chat HTTP/1.1\r\nHost: xflux\r\nContent-Length: 2\r\n\r\n{}")
+        .await;
+    let r1 = client.read_response().await;
+    assert!(r1.ends_with("first"), "{r1}");
+
+    // Second request checks out the pooled socket, hits the simulated keep-alive
+    // close race, and must transparently redial a fresh backend socket.
+    client
+        .send(b"POST /v1/chat HTTP/1.1\r\nHost: xflux\r\nContent-Length: 2\r\n\r\n{}")
+        .await;
+    let r2 = client.read_response().await;
+    assert!(r2.ends_with("second"), "{r2}");
+    assert_eq!(conns.load(Ordering::SeqCst), 2);
+    server.stop().await;
+}
+
+#[tokio::test]
+async fn thin_l7_passively_ejects_dead_backend_on_dial_failure() {
+    let live_hits = Arc::new(AtomicUsize::new(0));
+    let live: Handler = {
+        let live_hits = live_hits.clone();
+        Arc::new(move |mut socket| {
+            let live_hits = live_hits.clone();
+            Box::pin(async move {
+                let mut buf = Vec::new();
+                while let Some(head) = read_http_head(&mut socket, &mut buf).await {
+                    drain_fixed_body(&mut socket, &mut buf, &head).await;
+                    live_hits.fetch_add(1, Ordering::SeqCst);
+                    if socket
+                        .write_all(
+                            b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: keep-alive\r\n\r\nok",
+                        )
+                        .await
+                        .is_err()
+                    {
+                        return;
+                    }
+                }
+            })
+        })
+    };
+    let dead_listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let dead = dead_listener.local_addr().unwrap();
+    drop(dead_listener);
+    let live_addr = spawn_backend(live, Arc::new(AtomicUsize::new(0))).await;
+
+    let text = format!(
+        r#"
+[server]
+bind = "127.0.0.1:0"
+mode = "thin-l7"
+
+[timeouts]
+connect = "500ms"
+idle = "2s"
+total = "5s"
+fin = "500ms"
+
+[pool]
+max_idle_per_backend = 4
+idle_timeout = "5s"
+
+[backends]
+algorithm = "leastconn"
+health_interval = "0s"
+passive_unhealthy_threshold = 1
+eject_cooldown = "5s"
+
+[[backends.servers]]
+addr = "{dead}"
+weight = 1
+
+[[backends.servers]]
+addr = "{live_addr}"
+weight = 1
+
+[retry]
+max_retries = 1
+"#
+    );
+    let server = XFluxServer::start(Config::from_toml(&text).unwrap())
+        .await
+        .unwrap();
+
+    // First request tries `dead`, passively ejects it after 1 dial failure, and
+    // succeeds on `live_addr`. Subsequent requests go straight to `live_addr`.
+    let mut client = TestClient::connect(server.addr).await;
+    for _ in 0..3 {
+        client.send(b"GET / HTTP/1.1\r\nHost: xflux\r\n\r\n").await;
+        let resp = client.read_response().await;
+        assert!(resp.contains("200 OK"), "{resp}");
+    }
+    assert_eq!(live_hits.load(Ordering::SeqCst), 3);
+    server.stop().await;
+}

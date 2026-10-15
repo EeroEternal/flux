@@ -81,11 +81,24 @@ impl ConnPool {
             }
         }
 
+        let stream = self.dial(connect_timeout).await?;
+        Ok((stream, false))
+    }
+
+    /// Dial a fresh connection to the backend, bypassing the idle pool.
+    pub async fn dial(&self, connect_timeout: Duration) -> io::Result<TcpStream> {
         let stream = timeout(connect_timeout, TcpStream::connect(self.addr))
             .await
             .map_err(|_| io::Error::new(io::ErrorKind::TimedOut, "backend connect timeout"))??;
         stream.set_nodelay(true)?;
-        Ok((stream, false))
+        Ok(stream)
+    }
+
+    /// Drop all idle connections currently in the pool.
+    pub fn clear(&self) {
+        if let Ok(mut guard) = self.idle.lock() {
+            guard.clear();
+        }
     }
 
     /// Return a healthy connection to the pool.

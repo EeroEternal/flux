@@ -282,6 +282,16 @@ where
 /// may reuse the original set so a single backend can recover from a
 /// transient refuse.
 pub(crate) async fn connect(state: &AppState) -> anyhow::Result<(Lease, TcpStream)> {
+    let (lease, conn, reused) = connect_tagged(state).await?;
+    if reused {
+        lease.backend().record_conn_reuse();
+    }
+    Ok((lease, conn))
+}
+
+/// Like [`connect`], also returning `true` when the connection was checked out
+/// from the backend's idle pool rather than freshly dialed.
+pub(crate) async fn connect_tagged(state: &AppState) -> anyhow::Result<(Lease, TcpStream, bool)> {
     let mut last_error: Option<io::Error> = None;
     let mut skip = Vec::new();
     for attempt in 0..=state.config.retry.max_retries {
@@ -296,8 +306,8 @@ pub(crate) async fn connect(state: &AppState) -> anyhow::Result<(Lease, TcpStrea
             },
         };
         let addr = lease.backend().addr;
-        match lease.acquire().await {
-            Ok(conn) => return Ok((lease, conn)),
+        match lease.acquire_tagged().await {
+            Ok((conn, reused)) => return Ok((lease, conn, reused)),
             Err(e) => {
                 if !skip.contains(&addr) {
                     skip.push(addr);
