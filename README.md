@@ -20,10 +20,10 @@ timeouts and transparent forwarding.
 | L4 TCP splice (zero parsing) | ✅ default |
 | Thin-L7 (head parsing, body streaming) | ✅ request-level connection reuse |
 | Zero response/request buffering | ✅ bodies are copied in bounded chunks |
-| Backend connection pool for all methods | ✅ LIFO checkout; optional per-backend concurrency cap (`max_conns_per_backend`) |
+| Backend connection pool for all methods | ✅ LIFO checkout; stale-socket redial; optional per-backend concurrency cap (`max_conns_per_backend`) |
 | Layered timeouts (connect / first_byte / idle / total / fin) | ✅ |
 | Least-connections scheduling (weighted) | ✅ plus round-robin |
-| Health checks on `/health` | ✅ hysteresis, never touches live streams |
+| Health checks on `/health` + passive dial ejection | ✅ hysteresis, never touches live streams |
 | Retry only before response bytes | ✅ default 0 |
 | Prometheus metrics + TTFT delta | ✅ |
 | Graceful shutdown, `SO_REUSEPORT` | ✅ |
@@ -138,6 +138,8 @@ health_interval = "2s"    # "0s" disables active checking
 health_check_timeout = "2s"
 unhealthy_threshold = 2
 healthy_threshold = 2
+# passive_unhealthy_threshold = 0  # optional consecutive dial failures before immediate ejection
+# eject_cooldown = "5s"            # cooldown before passively ejected backend is re-admitted
 
 [[backends.servers]]
 addr = "10.56.88.32:8001"

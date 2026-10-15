@@ -6,8 +6,8 @@ use crate::pool::ConnPool;
 use std::io;
 use std::net::SocketAddr;
 use std::sync::atomic::{AtomicBool, AtomicU32, AtomicUsize, Ordering};
-use std::sync::Arc;
-use std::time::Duration;
+use std::sync::{Arc, Mutex};
+use std::time::{Duration, Instant};
 use tokio::net::TcpStream;
 use tokio::sync::{OwnedSemaphorePermit, Semaphore};
 
@@ -28,8 +28,12 @@ pub struct Backend {
     healthy: AtomicBool,
     success_streak: AtomicU32,
     failure_streak: AtomicU32,
+    dial_failure_streak: AtomicU32,
     unhealthy_threshold: u32,
     healthy_threshold: u32,
+    passive_unhealthy_threshold: u32,
+    eject_cooldown: Duration,
+    ejected_at: Mutex<Option<Instant>>,
     metrics: Arc<Metrics>,
 }
 
@@ -58,8 +62,12 @@ impl Backend {
             healthy: AtomicBool::new(true),
             success_streak: AtomicU32::new(0),
             failure_streak: AtomicU32::new(0),
+            dial_failure_streak: AtomicU32::new(0),
             unhealthy_threshold: config.backends.unhealthy_threshold,
             healthy_threshold: config.backends.healthy_threshold,
+            passive_unhealthy_threshold: config.backends.passive_unhealthy_threshold,
+            eject_cooldown: config.backends.eject_cooldown,
+            ejected_at: Mutex::new(None),
             metrics,
         });
         backend
@@ -82,32 +90,113 @@ impl Backend {
 
     /// Whether the scheduler may currently pick this backend.
     pub fn is_healthy(&self) -> bool {
-        self.healthy.load(Ordering::Relaxed)
+        if self.healthy.load(Ordering::Relaxed) {
+            return true;
+        }
+        if let Ok(mut guard) = self.ejected_at.lock() {
+            if let Some(since) = *guard {
+                if since.elapsed() >= self.eject_cooldown {
+                    *guard = None;
+                    self.dial_failure_streak.store(0, Ordering::Relaxed);
+                    self.healthy.store(true, Ordering::Relaxed);
+                    self.metrics
+                        .backend_healthy
+                        .with_label_values(&[&self.label])
+                        .set(1);
+                    tracing::info!(
+                        backend = %self.label,
+                        "passively ejected backend re-admitted after cooldown"
+                    );
+                    return true;
+                }
+            }
+        }
+        false
     }
 
     /// Acquire a connection, preferring a warm pooled one.
     pub async fn acquire(&self) -> io::Result<TcpStream> {
+        let (stream, reused) = self.acquire_tagged().await?;
+        if reused {
+            self.record_conn_reuse();
+        }
+        Ok(stream)
+    }
+
+    /// Acquire a connection along with whether it came from the idle pool.
+    ///
+    /// When `reused` is `true`, the caller is responsible for calling
+    /// [`Self::record_conn_reuse`] once it confirms the pooled socket will not
+    /// be discarded by a stale-socket redial.
+    pub async fn acquire_tagged(&self) -> io::Result<(TcpStream, bool)> {
         match self.pool.get(self.connect_timeout).await {
             Ok((stream, reused)) => {
-                if reused {
-                    self.metrics
-                        .conn_reuse_total
-                        .with_label_values(&[&self.label])
-                        .inc();
-                } else {
+                if !reused {
+                    self.dial_failure_streak.store(0, Ordering::Relaxed);
                     self.metrics
                         .conn_new_total
                         .with_label_values(&[&self.label])
                         .inc();
                 }
+                Ok((stream, reused))
+            }
+            Err(e) => {
+                self.on_dial_failure();
+                Err(e)
+            }
+        }
+    }
+
+    /// Record that a pooled connection checkout was successfully reused.
+    pub fn record_conn_reuse(&self) {
+        self.metrics
+            .conn_reuse_total
+            .with_label_values(&[&self.label])
+            .inc();
+    }
+
+    /// Dial a fresh backend connection, bypassing the idle pool.
+    pub async fn acquire_fresh(&self) -> io::Result<TcpStream> {
+        match self.pool.dial(self.connect_timeout).await {
+            Ok(stream) => {
+                self.dial_failure_streak.store(0, Ordering::Relaxed);
+                self.metrics
+                    .conn_new_total
+                    .with_label_values(&[&self.label])
+                    .inc();
                 Ok(stream)
             }
             Err(e) => {
-                self.metrics
-                    .conn_dial_errors_total
-                    .with_label_values(&[&self.label])
-                    .inc();
+                self.on_dial_failure();
                 Err(e)
+            }
+        }
+    }
+
+    fn on_dial_failure(&self) {
+        self.pool.clear();
+        self.metrics
+            .conn_dial_errors_total
+            .with_label_values(&[&self.label])
+            .inc();
+        if self.passive_unhealthy_threshold > 0 {
+            let failures = self.dial_failure_streak.fetch_add(1, Ordering::Relaxed) + 1;
+            if failures >= self.passive_unhealthy_threshold {
+                self.success_streak.store(0, Ordering::Relaxed);
+                if self.healthy.swap(false, Ordering::Relaxed) {
+                    if let Ok(mut guard) = self.ejected_at.lock() {
+                        *guard = Some(Instant::now());
+                    }
+                    self.metrics
+                        .backend_healthy
+                        .with_label_values(&[&self.label])
+                        .set(0);
+                    tracing::warn!(
+                        backend = %self.label,
+                        failures,
+                        "backend passively ejected after dial failures"
+                    );
+                }
             }
         }
     }
@@ -137,8 +226,12 @@ impl Backend {
     pub fn record_health(&self, ok: bool) {
         if ok {
             self.failure_streak.store(0, Ordering::Relaxed);
+            self.dial_failure_streak.store(0, Ordering::Relaxed);
             let successes = self.success_streak.fetch_add(1, Ordering::Relaxed) + 1;
-            if !self.is_healthy() && successes >= self.healthy_threshold {
+            if !self.healthy.load(Ordering::Relaxed) && successes >= self.healthy_threshold {
+                if let Ok(mut guard) = self.ejected_at.lock() {
+                    *guard = None;
+                }
                 self.healthy.store(true, Ordering::Relaxed);
                 self.metrics
                     .backend_healthy
@@ -153,13 +246,20 @@ impl Backend {
                 .health_check_failures
                 .with_label_values(&[&self.label])
                 .inc();
-            if self.is_healthy() && failures >= self.unhealthy_threshold {
-                self.healthy.store(false, Ordering::Relaxed);
-                self.metrics
-                    .backend_healthy
-                    .with_label_values(&[&self.label])
-                    .set(0);
-                tracing::warn!(backend = %self.label, "backend marked unhealthy");
+            if failures >= self.unhealthy_threshold {
+                let was_ejected = self
+                    .ejected_at
+                    .lock()
+                    .map(|mut guard| guard.take().is_some())
+                    .unwrap_or(false);
+                self.pool.clear();
+                if self.healthy.swap(false, Ordering::Relaxed) || was_ejected {
+                    self.metrics
+                        .backend_healthy
+                        .with_label_values(&[&self.label])
+                        .set(0);
+                    tracing::warn!(backend = %self.label, "backend marked unhealthy");
+                }
             }
         }
     }
@@ -215,6 +315,18 @@ impl Lease {
     pub async fn acquire(&mut self) -> io::Result<TcpStream> {
         self.ensure_permit().await?;
         self.backend.acquire().await
+    }
+
+    /// Acquire a connection along with whether it was reused from the idle pool.
+    pub async fn acquire_tagged(&mut self) -> io::Result<(TcpStream, bool)> {
+        self.ensure_permit().await?;
+        self.backend.acquire_tagged().await
+    }
+
+    /// Dial a fresh backend connection under this lease's concurrency permit.
+    pub async fn acquire_fresh(&mut self) -> io::Result<TcpStream> {
+        self.ensure_permit().await?;
+        self.backend.acquire_fresh().await
     }
 }
 
@@ -408,5 +520,56 @@ addr = "127.0.0.1:2"
         // capacity), so the next selection must spill over to backend 2.
         let third = scheduler.select().unwrap();
         assert_eq!(third.backend().addr, second_addr);
+    }
+
+    #[test]
+    fn passive_ejection_and_cooldown_recovery() {
+        let config = crate::config::Config::from_toml(
+            r#"
+[server]
+bind = "127.0.0.1:0"
+[backends]
+passive_unhealthy_threshold = 2
+eject_cooldown = "25ms"
+[[backends.servers]]
+addr = "127.0.0.1:1"
+"#,
+        )
+        .unwrap();
+        let metrics = Metrics::new().unwrap();
+        let scheduler = Scheduler::new(&config, metrics).unwrap();
+        let backend = &scheduler.backends()[0];
+        assert!(backend.is_healthy());
+
+        backend.on_dial_failure();
+        assert!(backend.is_healthy());
+        backend.on_dial_failure();
+        assert!(!backend.is_healthy());
+        assert!(scheduler.select().is_none());
+
+        std::thread::sleep(Duration::from_millis(35));
+        assert!(backend.is_healthy());
+        assert!(scheduler.select().is_some());
+
+        // Accumulate a healthy probe streak, then passively eject.
+        backend.record_health(true);
+        backend.on_dial_failure();
+        backend.on_dial_failure();
+        assert!(!backend.is_healthy());
+
+        // Active health failures must override passive cooldown re-admission.
+        backend.record_health(false);
+        backend.record_health(false);
+        std::thread::sleep(Duration::from_millis(35));
+        assert!(
+            !backend.is_healthy(),
+            "active health check failure must prevent passive cooldown re-admission"
+        );
+
+        // Hysteresis (healthy_threshold = 2) must require two successes.
+        backend.record_health(true);
+        assert!(!backend.is_healthy());
+        backend.record_health(true);
+        assert!(backend.is_healthy());
     }
 }

@@ -121,9 +121,19 @@ the backend's first byte) or `idle` (afterwards). The splice is then cancelled.
   below `max_conns_per_backend` before falling back to full backends.
 - leastconn compares `active/weight` by cross-multiplying to avoid floats.
 - health probes hit `GET {path}` and only flip the `healthy` flag after
-  `unhealthy_threshold` / `healthy_threshold` consecutive results. In-flight
-  streams are never interrupted.
+  `unhealthy_threshold` / `healthy_threshold` consecutive results. When a
+  backend transitions to unhealthy (or fails a TCP dial), its idle `ConnPool` is
+  immediately cleared. In-flight streams are never interrupted.
+- When `backends.passive_unhealthy_threshold > 0`, consecutive data-plane TCP
+  dial failures immediately mark the backend unhealthy so `leastconn` does not
+  blackhole traffic onto a dead `active == 0` backend between active probes; the
+  backend is re-admitted after `backends.eject_cooldown` (or earlier if an
+  active `/health` probe succeeds).
 - Retries apply **only** to connection establishment and re-select a backend.
+  In `thin-l7`, if a connection checked out from the idle pool (`reused = true`)
+  fails while writing the request or immediately closes with 0 response bytes
+  (HTTP/1.1 keep-alive timeout race), xFlux dials one fresh connection on the
+  same lease before any response byte has been sent to the client.
 
 ## Invariants (must hold after any change)
 

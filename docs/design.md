@@ -94,6 +94,7 @@ TLS 终止与 l4/thin-l7 模式正交：l4 下仍做字节拼接，thin-l7 下�
 
 ### 5.1 连接池与复用
 - 获取连接时采用 **LIFO（后进先出）** 优先取出最近归还的热连接，并用非阻塞读探测存活（EOF 或有脏数据则丢弃），同时顺手清理池头已过期的旧连接。
+- **复用竞态防半死重拨（`thin-l7`）**：当从空闲池取出的连接（`reused = true`）在写入请求头时失败，或对无请求体/已完整读入初始缓冲区的定长请求在收到任何响应字节前即遭遇对端 keep-alive 关断（0 字节 EOF / RST），xFlux 会透明重拨一条新连接完成转发，消除 HTTP/1.1 keep-alive 超时竞态导致的偶发 502/EOF。
 - 流结束后把连接还回池（仅 thin-l7，且响应已完整消费、无残留字节）；若池满则淘汰最旧的空闲连接以保留最新热连接。
 - 可选单后端并发上限 `pool.max_conns_per_backend`（默认 `0` 不限）：配置正整数时按后端维护信号量，等待槽位超时（`pool.acquire_timeout`，默认同 `timeouts.connect`）则计入 `xflux_rejected_total{reason="queue_full"}` 并在 `thin-l7` 下返回 `503 Service Unavailable`。
 - POST 与 GET 同等对待。
@@ -109,9 +110,10 @@ TLS 终止与 l4/thin-l7 模式正交：l4 下仍做字节拼接，thin-l7 下�
 加权 leastconn（及 roundrobin）：优先选择未达到 `max_conns_per_backend` 容量上限的健康后端，在可用集合内按 `active/weight` 最小（或轮询）分配，避免长流把新请求堆到忙节点。
 
 ### 5.5 失败处理
-- 连接建立失败：可重试（默认 0 次，且会重新调度）。
+- 连接建立失败：可重试（默认 0 次，且会重新调度），同时立即清空该后端的空闲连接池。
+- 被动健康熔断（可选 `backends.passive_unhealthy_threshold`）：连续建连失败达到阈值时无需等待下一轮主动 `/health` 探测即可立即摘除死节点，防止 leastconn 在探测间隔内把新流量持续打向 `active = 0` 的死节点；经过 `backends.eject_cooldown`（默认 `5s`）或主动探活恢复后自动重新纳入调度。
 - 已开始传输后失败：直接关闭两端，记录指标，不重放。
-- 健康检查失败：标记 unhealthy，已有流继续，新请求不再调度过去。
+- 健康检查失败：标记 unhealthy 并清空该后端空闲连接池，已有流继续，新请求不再调度过去。
 
 ## 6. 技术选型
 

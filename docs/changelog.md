@@ -12,6 +12,17 @@ Write bullets that a human can ship from: **what changed**, **who it affects**,
 
 ### Added
 
+- **Passive dial-failure ejection (`backends.passive_unhealthy_threshold` & `backends.eject_cooldown`)**:
+  optional data-plane circuit breaking that marks a backend unhealthy after N
+  consecutive TCP dial failures without waiting for the next active `/health`
+  tick (preventing `leastconn` from routing traffic to a dead `active = 0`
+  backend between probes), purges its idle connection pool, and automatically
+  re-admits it after `eject_cooldown` (default `5s`).
+- **Stale pooled connection redial (`thin-l7`)**: when a pooled keep-alive
+  connection (`reused = true`) races with a backend keep-alive close (failing on
+  request write or returning an immediate 0-byte EOF before any response byte),
+  `thin-l7` transparently dials a fresh connection once instead of surfacing a
+  broken stream to the client.
 - **Per-backend concurrency cap (`pool.max_conns_per_backend` & `pool.acquire_timeout`)**:
   optional per-backend in-flight connection limit (default `0` = unlimited) with
   bounded queue wait (`pool.acquire_timeout`, defaulting to `timeouts.connect`)

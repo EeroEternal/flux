@@ -178,6 +178,18 @@ pub struct BackendsConfig {
     /// Consecutive successes before a backend is marked healthy again.
     #[serde(default = "default_healthy_threshold")]
     pub healthy_threshold: u32,
+    /// Consecutive data-plane TCP dial failures before passively ejecting a
+    /// backend without waiting for the next active probe. `0` (default) disables
+    /// passive ejection.
+    #[serde(default)]
+    pub passive_unhealthy_threshold: u32,
+    /// Cooldown before a passively ejected backend is re-admitted when active
+    /// health probes have not already recovered it.
+    #[serde(
+        deserialize_with = "duration::deserialize",
+        default = "default_eject_cooldown"
+    )]
+    pub eject_cooldown: Duration,
     /// The gateway instances.
     #[serde(default)]
     pub servers: Vec<ServerEntry>,
@@ -306,6 +318,11 @@ impl Config {
                 anyhow::bail!("pool.acquire_timeout must be greater than zero");
             }
         }
+        if self.backends.passive_unhealthy_threshold > 0 && self.backends.eject_cooldown.is_zero() {
+            anyhow::bail!(
+                "backends.eject_cooldown must be greater than zero when passive_unhealthy_threshold > 0"
+            );
+        }
         if self.server.tls.enabled
             && (self.server.tls.cert.is_none() || self.server.tls.key.is_none())
         {
@@ -379,6 +396,9 @@ fn default_unhealthy_threshold() -> u32 {
 }
 fn default_healthy_threshold() -> u32 {
     2
+}
+fn default_eject_cooldown() -> Duration {
+    Duration::from_secs(5)
 }
 fn default_weight() -> u32 {
     1
