@@ -4,18 +4,52 @@ on:
   push:
     branches: [ main, master ]
   pull_request:
-    branches: [ main, master ]
 
 permissions:
   contents: read
+  pull-requests: read
 
 concurrency:
   group: ci-${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
 
 jobs:
+  changes:
+    name: Detect code changes
+    runs-on: ubuntu-latest
+    timeout-minutes: 3
+    outputs:
+      code: ${{ steps.filter.outputs.code }}
+    steps:
+      - id: filter
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+          if [ "${{ github.event_name }}" = "pull_request" ]; then
+            files="$(gh api --paginate "repos/$REPO/pulls/${{ github.event.pull_request.number }}/files" --jq '.[].filename')"
+          else
+            before="${{ github.event.before }}"
+            if [ -z "$before" ] || printf '%s' "$before" | grep -qE '^0+$'; then
+              echo "code=true" >> "$GITHUB_OUTPUT"
+              exit 0
+            fi
+            files="$(gh api "repos/$REPO/compare/$before...${{ github.sha }}" --jq '.files[].filename')"
+          fi
+
+          # Code files filter (exclude pure documentation and AI metacode)
+          code_files="$(printf '%s\n' "$files" | grep -vE '^(docs/|\.agents/)|\.md$' || true)"
+          if [ -n "$code_files" ]; then
+            echo "code=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "code=false" >> "$GITHUB_OUTPUT"
+          fi
+
   rust-gate:
     name: Rust Gate (fmt, clippy, tests)
+    needs: [changes]
+    if: needs.changes.outputs.code == 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 15
     env:
@@ -34,11 +68,5 @@ jobs:
         with:
           shared-key: ci-rust
 
-      - name: Check formatting
-        run: cargo fmt --check
-
-      - name: Run clippy
-        run: cargo clippy --all-targets -- -D warnings
-
-      - name: Run tests
-        run: cargo test --workspace
+      - name: Run local gates
+        run: bash scripts/local-gates.sh

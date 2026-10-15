@@ -1,0 +1,6 @@
+#!/usr/bin/env bash
+# Pre-push Git hook: runs local CI gates before pushing code changes.
+set -euo pipefail
+
+ROOT="$(git rev-parse --show-toplevel)"
+exec bash "$ROOT/scripts/local-gates.sh"

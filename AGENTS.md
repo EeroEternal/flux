@@ -26,6 +26,8 @@ needs **≥ 2 independent occurrences** and human review.
 | Timeouts, connection reuse, retry, scheduling | [`docs/architecture.md`](docs/architecture.md) "Invariants" |
 | TLS termination / listener changes | [`docs/dev/`](docs/dev/) + `src/server.rs` |
 | Commit message wording | [`docs/ai/agents/commit-style.md`](docs/ai/agents/commit-style.md) |
+| `git stash` operations | skill [`git-stash-safe`](.agents/skills/git-stash-safe/SKILL.md) |
+| CI pipelines / concurrency / caching | skill [`ci-concurrency-optimization`](.agents/skills/ci-concurrency-optimization/SKILL.md) |
 | Push / PR | skill [`pre-push-local-gates`](.agents/skills/pre-push-local-gates/SKILL.md) |
 | Tag / release / deploy | skill [`release`](.agents/skills/release/SKILL.md) |
 | Code review / acceptance | skill [`review`](.agents/skills/review/SKILL.md) |
@@ -44,12 +46,14 @@ needs **≥ 2 independent occurrences** and human review.
    `cargo check --tests` after popping. Never stash `Cargo.toml` / `Cargo.lock`
    / build scripts.
 4. **Release guardrail.** Local closed-loop verification first. Do not run
-   `git tag` or merge a release branch without explicit human approval.
+   `git tag` or merge a release branch without explicit human approval (follow
+   skill [`release`](.agents/skills/release/SKILL.md)).
 5. **Streaming invariants (xFlux core).** Never buffer a request or response
    body; only return a backend connection to the pool at a proven message
    boundary; never retry a request once any response byte has flowed.
-6. **Timeout layering is load-bearing.** `connect < idle < total`, and `fin`
-   governs half-close. Do not collapse these into a single timeout.
+6. **Timeout layering is load-bearing.** `connect <= total`, `idle <= total`,
+   `first_byte <= total`, and `fin` governs half-close. Do not collapse these
+   into a single timeout.
 7. **Protocol transparency.** Any traffic thin-l7 cannot parse must fall back to
    the L4 splice byte-for-byte, preserving the bytes already buffered.
 8. **Pre-push local quality gate.** Never use CI as a local sandbox. Run
@@ -65,6 +69,9 @@ needs **≥ 2 independent occurrences** and human review.
 
 Authoritative skills live under [`.agents/skills/`](.agents/skills/).
 
+- [`ci-concurrency-optimization`](.agents/skills/ci-concurrency-optimization/SKILL.md)
+- [`git-stash-safe`](.agents/skills/git-stash-safe/SKILL.md)
 - [`pre-push-local-gates`](.agents/skills/pre-push-local-gates/SKILL.md)
+- [`promote-lesson`](.agents/skills/promote-lesson/SKILL.md)
 - [`release`](.agents/skills/release/SKILL.md)
 - [`review`](.agents/skills/review/SKILL.md)

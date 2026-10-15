@@ -18,6 +18,9 @@ description: Push 前必须在本地跑满与 CI 等效的门禁（Rust fmt/clip
 # 一条命令跑满（推荐）
 bash scripts/local-gates.sh
 
+# 首次克隆后安装本地 Git pre-push 钩子（自动在 git push 前执行 local-gates.sh）
+bash scripts/install-hooks.sh
+
 # 等价手工命令
 cargo fmt --check
 cargo clippy --all-targets -- -D warnings
