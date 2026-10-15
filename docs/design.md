@@ -1,22 +1,22 @@
-# Flux: AI 流式负载均衡设计文档
+# xFlux: AI 流式负载均衡设计文档
 
-> 名称：**Flux**（备选 Conduit / Artery / Photon）。短、好记，直接对应
+> 名称：**xFlux**（备选 Conduit / Artery / Photon）。短、好记，直接对应
 > 「连续流动的流式数据」。AI 网关最核心的不是请求/响应，而是一条长命的、
 > 边生成边吐的流。
 
 ## 1. 概述
 
-Flux 是一个面向 AI 推理网关的极简、流式优先负载均衡器。它的唯一职责是以
+xFlux 是一个面向 AI 推理网关的极简、流式优先负载均衡器。它的唯一职责是以
 最小延迟、正确语义地把长命、非幂等的流式 POST 请求转发到后端网关实例。
 
 它不是通用 L7 代理，也不是模型路由/计费网关。模型选择、token 计量、prompt
-改写、协议转换全部留在后端。Flux 只做连接管理、
+改写、协议转换全部留在后端。xFlux 只做连接管理、
 调度、健康检查和透明转发。
 
 ## 2. 目标与非目标
 
 ### 目标
-- 首字节增量接近 0（直连 vs 经 Flux 的 TTFB 差值在几毫秒内）
+- 首字节增量接近 0（直连 vs 经 xFlux 的 TTFB 差值在几毫秒内）
 - 对 POST 也复用后端连接
 - 不缓冲请求体和响应体
 - 超时覆盖最长流（默认 ≥ 600s）
@@ -28,7 +28,7 @@ Flux 是一个面向 AI 推理网关的极简、流式优先负载均衡器。�
 - 不做模型感知路由；不做计费、鉴权、内容改写；不做请求体聚合或响应体重组
 - 不解析 SSE / NDJSON / JSON payload；不把 `[DONE]` 或 token 当作转发/还池/调度条件
 - 不支持自动重试生成类请求；不追求成为功能齐全的 API 网关
-- Flux 占据 HAProxy 位：转发字节，不转发 token
+- xFlux 占据 HAProxy 位：转发字节，不转发 token
 
 ## 3. 核心约束
 
@@ -45,7 +45,7 @@ Flux 是一个面向 AI 推理网关的极简、流式优先负载均衡器。�
 
 ```
 ┌─────────────┐     ┌──────────────────┐     ┌─────────────────┐
-│   Client    │────▶│      Flux        │────▶│  AI Gateway(s)  │
+│   Client    │────▶│      xFlux       │────▶│  AI Gateway(s)  │
 │  (k6 / app) │◀────│  (L4 or thin L7) │◀────│  backends       │
 └─────────────┘     └──────────────────┘     └─────────────────┘
                            │
@@ -69,12 +69,12 @@ Flux 是一个面向 AI 推理网关的极简、流式优先负载均衡器。�
 
 thin-l7 只认 HTTP/1.1。当首字节不是大写 HTTP 方法字符（TLS 记录、二进制
 协议）、看到 HTTP/2 preface（`PRI * HTTP/2.0`）、请求无法按 HTTP/1.1 解析、
-或出现 `CONNECT` / `Upgrade`（WebSocket、h2c）时，Flux 立即停止解析，把
+或出现 `CONNECT` / `Upgrade`（WebSocket、h2c）时，xFlux 立即停止解析，把
 已缓冲的字节连同后续字节一起交给 L4 splice 原样透传。客户端无感知。
 
 ### 4.1.2 TLS 终止（可选）
 
-`[server.tls]` 打开后，Flux 用 rustls 在客户端侧终止 TLS，再把明文交给
+`[server.tls]` 打开后，xFlux 用 rustls 在客户端侧终止 TLS，再把明文交给
 正常转发路径，从而让 HTTPS 客户端直达明文网关。ALPN 只宣告 HTTP/1.1。
 TLS 终止与 l4/thin-l7 模式正交：l4 下仍做字节拼接，thin-l7 下额外获得
 请求级连接复用。
@@ -127,14 +127,14 @@ TLS 终止与 l4/thin-l7 模式正交：l4 下仍做字节拼接，thin-l7 下�
 
 ## 7. 可观测性
 
-见 README 的指标表。核心是 `flux_ttft_delta_ms`（代理引入的首字节增量）、
-`flux_conn_reuse_total` / `flux_conn_new_total`（连接复用率）和
-`flux_stream_duration_seconds`（流生命周期）。
+见 README 的指标表。核心是 `xflux_ttft_delta_ms`（代理引入的首字节增量）、
+`xflux_conn_reuse_total` / `xflux_conn_new_total`（连接复用率）和
+`xflux_stream_duration_seconds`（流生命周期）。
 
 ## 8. 部署与验证
 
 - 单二进制，配置驱动；建议与网关同机房、低 RTT。
-- 验收：直连 vs 经 Flux 的 `ttft` 差值 < 10ms；整段时长/QPS/chunk 间隔一致；
+- 验收：直连 vs 经 xFlux 的 `ttft` 差值 < 10ms；整段时长/QPS/chunk 间隔一致；
   受控 A/B 分别验证连接复用、超时、调度算法的贡献。
 
 ## 9. 实现阶段
@@ -150,6 +150,6 @@ TLS 终止与 l4/thin-l7 模式正交：l4 下仍做字节拼接，thin-l7 下�
 
 - 自定义代理的连接管理、半关闭、超时边界容易出 bug，因此有完善的集成测试
   （长流、半关闭、后端突然断开、健康检查抖动）。
-- 只做透明转发 + 基础健康时，配好的 HAProxy/nginx 成本更低；Flux 的价值在于
+- 只做透明转发 + 基础健康时，配好的 HAProxy/nginx 成本更低；xFlux 的价值在于
   默认路径就是流式友好的，且指标能精确反映 TTFT 增量。
-- 不要在 Flux 里做模型路由或计费，否则会重新引入网关已经解决的问题。
+- 不要在 xFlux 里做模型路由或计费，否则会重新引入网关已经解决的问题。

@@ -4,7 +4,7 @@ Structure and lifecycle of the `docs/` tree.
 
 ## Directory structure
 
-- `docs/design.md`: single source of truth for the Flux design rationale
+- `docs/design.md`: single source of truth for the xFlux design rationale
   (goals, non-goals, constraints, timeout model, roadmap).
 - `docs/architecture.md`: how the design is realised in code — module map,
   request lifecycle, invariants, mode tradeoffs, fallback and TLS.

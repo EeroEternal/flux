@@ -15,7 +15,7 @@
 - `chore` — 构建、发版、依赖升级
 - `ci` — CI / 工作流
 
-Flux 常用 scope：`proxy`、`l4`、`l7`、`pool`、`scheduler`、`health`、
+xFlux 常用 scope：`proxy`、`l4`、`l7`、`pool`、`scheduler`、`health`、
 `metrics`、`config`、`server`、`tls`、`docs`、`ci`、`release`。
 
 **subject 必须反映真实内容**。禁止：

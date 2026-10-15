@@ -12,9 +12,13 @@ Write bullets that a human can ship from: **what changed**, **who it affects**,
 
 ### Changed
 
-- Documented the HAProxy-like LB boundary: Flux inspects HTTP/TCP framing only
+- **Renamed project to xFlux (`xflux`)**: crate, binary (`xflux`), server type
+  (`XFluxServer`), health probe `User-Agent` (`xflux-health`), JSON log env var
+  (`XFLUX_LOG_JSON`), default log filter (`xflux=info`), and all Prometheus
+  metric names (`xflux_*`) are unified under the `xflux` namespace.
+- Documented the HAProxy-like LB boundary: xFlux inspects HTTP/TCP framing only
   and never payload semantics (SSE, JSON, tokens). Metric help strings now say
-  TTFB, not token-aware TTFT. Prometheus names are unchanged.
+  TTFB, not token-aware TTFT.
 
 ### Fixed
 
