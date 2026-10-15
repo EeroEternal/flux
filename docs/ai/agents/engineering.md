@@ -96,3 +96,20 @@ extended with Flux's streaming constraints.
 2. **编译失败还报完成**：暂停工作，提交复盘。
 3. **重复同类错误 3 次以上**：后续 commit 必须 pair review。
 4. **夹带生产参数私货**：立即 revert，重新按单独 commit 提交。
+
+---
+
+## 九、负载均衡边界（HAProxy 位，禁止滑向网关）
+
+Flux 的产品位是长流前面的 HAProxy，不是推理网关。审查热路径时用这一条判越界：
+
+> **只碰为了「选谁、能否还池、何时断开」所必需的帧；永远不碰 payload 语义。**
+
+| 允许（帧） | 禁止（语义） |
+| --- | --- |
+| TCP splice；HTTP 头；Content-Length / chunked 边界 | SSE `data:` / `[DONE]` / NDJSON 行扫描 |
+| 协议嗅探与自动回退 L4 | 从 body 抽 `model`、prompt hash、KV 前缀 |
+| leastconn / RR、健康、请求头、带外 agent 负载 | 用 token 速率做调度 |
+| 连接建立失败时 redispatch | 出响应字节后重试或重放 |
+
+还池条件是 HTTP 自描述帧结束，不是模型说生成完了。热路径上新增对 body / SSE / JSON 的解析即越界，评审直接拒。

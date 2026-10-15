@@ -124,6 +124,8 @@ then cancelled. `total` is a plain sleep raced against the splice.
 4. `connect <= idle <= total`; `fin` is independent.
 5. Any protocol thin-l7 cannot parse is forwarded byte-for-byte via L4.
 6. Every metric that has a success/increment path has a failure counterpart.
+7. Payload bytes are opaque. Flux must not parse SSE, NDJSON, JSON, or any
+   application body to make forwarding, pooling, retry, or scheduling decisions.
 
 ## Testing strategy
 
@@ -132,5 +134,6 @@ then cancelled. `total` is a plain sleep raced against the splice.
 - `tests/integration.rs` starts real mock gateways and a real Flux server. It
   covers pass-through, half-close, chunked streaming, backend reuse, pipelined
   requests, abrupt backend death, leastconn scheduling, automatic L4 fallback
-  (HTTP/2, binary, Upgrade) and TLS termination end-to-end.
+  (HTTP/2, binary, Upgrade), TLS termination, opaque SSE/`[DONE]` bodies,
+  connect redispatch, and no retry after the first response byte.
 - `scripts/local-gates.sh` must be green before pushing.

@@ -207,18 +207,27 @@ impl Scheduler {
     ///
     /// Returns `None` when no backend is healthy.
     pub fn select(&self) -> Option<Lease> {
+        self.select_skipping(&[])
+    }
+
+    /// Select a healthy backend that is not in `skip`.
+    ///
+    /// Used by connect retries so a refused backend is not immediately
+    /// re-picked by leastconn. Returns `None` when every healthy backend is
+    /// skipped; the caller may then fall back to [`Self::select`].
+    pub(crate) fn select_skipping(&self, skip: &[SocketAddr]) -> Option<Lease> {
         let backend = match self.algorithm {
-            Algorithm::Leastconn => self.select_leastconn(),
-            Algorithm::Roundrobin => self.select_round_robin(),
+            Algorithm::Leastconn => self.select_leastconn(skip),
+            Algorithm::Roundrobin => self.select_round_robin(skip),
         }?;
         backend.on_select();
         Some(Lease { backend })
     }
 
-    fn select_leastconn(&self) -> Option<Arc<Backend>> {
+    fn select_leastconn(&self, skip: &[SocketAddr]) -> Option<Arc<Backend>> {
         self.backends
             .iter()
-            .filter(|b| b.is_healthy())
+            .filter(|b| b.is_healthy() && !skip.contains(&b.addr))
             .min_by(|a, b| {
                 // Weighted least-connections: compare active/weight without
                 // floating point by cross multiplying. Lower wins.
@@ -229,7 +238,7 @@ impl Scheduler {
             .cloned()
     }
 
-    fn select_round_robin(&self) -> Option<Arc<Backend>> {
+    fn select_round_robin(&self, skip: &[SocketAddr]) -> Option<Arc<Backend>> {
         let n = self.backends.len();
         if n == 0 {
             return None;
@@ -238,7 +247,7 @@ impl Scheduler {
         for offset in 0..n {
             let idx = (start + offset) % n;
             let backend = &self.backends[idx];
-            if backend.is_healthy() {
+            if backend.is_healthy() && !skip.contains(&backend.addr) {
                 return Some(backend.clone());
             }
         }
@@ -272,5 +281,31 @@ addr = "127.0.0.1:2"
         // Hold the first lease, then select again: it must pick the other one.
         let second = scheduler.select().unwrap();
         assert_ne!(first_addr, second.backend().addr);
+    }
+
+    #[test]
+    fn leastconn_skips_failed_backend_on_retry() {
+        let config = crate::config::Config::from_toml(
+            r#"
+[server]
+bind = "127.0.0.1:0"
+[backends]
+[[backends.servers]]
+addr = "127.0.0.1:1"
+[[backends.servers]]
+addr = "127.0.0.1:2"
+"#,
+        )
+        .unwrap();
+        let metrics = Metrics::new().unwrap();
+        let scheduler = Scheduler::new(&config, metrics).unwrap();
+        let first = scheduler.select().unwrap();
+        let first_addr = first.backend().addr;
+        drop(first);
+        let second = scheduler.select_skipping(&[first_addr]).unwrap();
+        assert_ne!(first_addr, second.backend().addr);
+        assert!(scheduler
+            .select_skipping(&[first_addr, second.backend().addr])
+            .is_none());
     }
 }

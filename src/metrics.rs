@@ -19,13 +19,13 @@ const DURATION_BUCKETS: &[f64] = &[
 pub struct Metrics {
     /// Registry used to render the Prometheus text exposition.
     pub registry: Registry,
-    /// Proxy-added first-byte latency for L7 (milliseconds).
+    /// Proxy-added first-byte latency for L7 (milliseconds). TTFB, not tokens.
     pub ttft_delta_ms: Histogram,
     /// Time from the request being fully written to the backend until the
-    /// backend's first response byte.
+    /// backend's first response byte (TTFB, not first token).
     pub upstream_ttft_ms: Histogram,
     /// Time from the request being fully written to the backend until the
-    /// client receives its first response byte.
+    /// client receives its first response byte (TTFB, not first token).
     pub client_ttft_ms: Histogram,
     /// Whole request/stream duration.
     pub stream_duration_seconds: Histogram,
@@ -63,20 +63,23 @@ impl Metrics {
         let registry = Registry::new();
 
         let ttft_delta_ms = Histogram::with_opts(
-            HistogramOpts::new("flux_ttft_delta_ms", "Proxy-added first-byte latency (ms)")
-                .buckets(TTFT_BUCKETS.to_vec()),
+            HistogramOpts::new(
+                "flux_ttft_delta_ms",
+                "Proxy-added first-byte latency in ms (TTFB; not token-aware)",
+            )
+            .buckets(TTFT_BUCKETS.to_vec()),
         )?;
         let upstream_ttft_ms = Histogram::with_opts(
             HistogramOpts::new(
                 "flux_upstream_ttft_ms",
-                "Time from request completion to backend first byte (ms)",
+                "Time from request completion to backend first byte in ms (TTFB; not token-aware)",
             )
             .buckets(TTFT_BUCKETS.to_vec()),
         )?;
         let client_ttft_ms = Histogram::with_opts(
             HistogramOpts::new(
                 "flux_client_ttft_ms",
-                "Time from request completion to client first byte (ms)",
+                "Time from request completion to client first byte in ms (TTFB; not token-aware)",
             )
             .buckets(TTFT_BUCKETS.to_vec()),
         )?;

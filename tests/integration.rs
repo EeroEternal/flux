@@ -39,6 +39,15 @@ async fn spawn_backend(handler: Handler, conns: Arc<AtomicUsize>) -> SocketAddr 
 }
 
 async fn start_flux(mode: &str, backends: &[SocketAddr]) -> FluxServer {
+    start_flux_cfg(mode, backends, "leastconn", 0).await
+}
+
+async fn start_flux_cfg(
+    mode: &str,
+    backends: &[SocketAddr],
+    algorithm: &str,
+    max_retries: u32,
+) -> FluxServer {
     let mut servers = String::new();
     for addr in backends {
         servers.push_str(&format!(
@@ -62,13 +71,13 @@ max_idle_per_backend = 8
 idle_timeout = "5s"
 
 [backends]
-algorithm = "leastconn"
+algorithm = "{algorithm}"
 health_interval = "0s"
 
 {servers}
 
 [retry]
-max_retries = 0
+max_retries = {max_retries}
 
 [metrics]
 enabled = false
@@ -195,6 +204,30 @@ impl TestClient {
             self.buf.extend_from_slice(&tmp[..n]);
         }
     }
+}
+
+async fn drain_fixed_body(socket: &mut TcpStream, buf: &mut Vec<u8>, head: &[u8]) {
+    let head_text = String::from_utf8_lossy(head);
+    let len = head_text
+        .lines()
+        .find_map(|line| {
+            let (name, value) = line.split_once(':')?;
+            if name.eq_ignore_ascii_case("content-length") {
+                value.trim().parse::<usize>().ok()
+            } else {
+                None
+            }
+        })
+        .unwrap_or(0);
+    while buf.len() < len {
+        let mut tmp = [0u8; 1024];
+        match socket.read(&mut tmp).await {
+            Ok(0) | Err(_) => return,
+            Ok(n) => buf.extend_from_slice(&tmp[..n]),
+        }
+    }
+    let take = len.min(buf.len());
+    buf.drain(..take);
 }
 
 async fn read_http_head(socket: &mut TcpStream, buf: &mut Vec<u8>) -> Option<Vec<u8>> {
@@ -632,6 +665,376 @@ async fn tls_termination_serves_http_and_reuses_backend() {
     let text = String::from_utf8_lossy(&response);
     assert!(text.contains("200 OK"), "unexpected response: {text}");
     assert!(text.ends_with("secure"));
+    assert_eq!(conns.load(Ordering::SeqCst), 1);
+    server.stop().await;
+}
+
+fn chunk(data: &str) -> Vec<u8> {
+    let mut out = format!("{:x}\r\n", data.len()).into_bytes();
+    out.extend_from_slice(data.as_bytes());
+    out.extend_from_slice(b"\r\n");
+    out
+}
+
+async fn read_until(stream: &mut TcpStream, needle: &[u8]) -> Vec<u8> {
+    let mut received = Vec::new();
+    let mut buf = [0u8; 4096];
+    loop {
+        let n = tokio::time::timeout(Duration::from_secs(3), stream.read(&mut buf))
+            .await
+            .expect("timed out waiting for backend bytes")
+            .unwrap();
+        assert!(n > 0, "eof before finding {needle:?}");
+        received.extend_from_slice(&buf[..n]);
+        if find(&received, needle).is_some() {
+            return received;
+        }
+    }
+}
+
+/// `[DONE]` is payload. Flux must keep splicing until the HTTP chunked terminator.
+#[tokio::test]
+async fn thin_l7_treats_sse_done_as_opaque_payload() {
+    let conns = Arc::new(AtomicUsize::new(0));
+    let handler: Handler = Arc::new(|mut socket| {
+        Box::pin(async move {
+            let mut leftover = Vec::new();
+            for i in 0..2 {
+                let req_head = match read_http_head(&mut socket, &mut leftover).await {
+                    Some(head) => head,
+                    None => return,
+                };
+                drain_fixed_body(&mut socket, &mut leftover, &req_head).await;
+                if i == 0 {
+                    let head = b"HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nTransfer-Encoding: chunked\r\nConnection: keep-alive\r\n\r\n";
+                    if socket.write_all(head).await.is_err() {
+                        return;
+                    }
+                    for part in [
+                        "data: hello\n\n",
+                        "data: [DONE]\n\n",
+                        "data: still-going\n\n",
+                    ] {
+                        if socket.write_all(&chunk(part)).await.is_err() {
+                            return;
+                        }
+                    }
+                    let _ = socket.write_all(b"0\r\n\r\n").await;
+                } else {
+                    let body = b"ok";
+                    let response = format!(
+                        "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: keep-alive\r\n\r\n{}",
+                        body.len(),
+                        std::str::from_utf8(body).unwrap()
+                    );
+                    let _ = socket.write_all(response.as_bytes()).await;
+                }
+            }
+        })
+    });
+    let backend = spawn_backend(handler, conns.clone()).await;
+    let server = start_flux("thin-l7", &[backend]).await;
+
+    let mut client = TcpStream::connect(server.addr).await.unwrap();
+    client
+        .write_all(b"POST /v1/chat HTTP/1.1\r\nHost: flux\r\nContent-Length: 2\r\n\r\n{}")
+        .await
+        .unwrap();
+    let first = read_until(&mut client, b"0\r\n\r\n").await;
+    let text = String::from_utf8_lossy(&first);
+    assert!(text.contains("data: hello"), "{text}");
+    assert!(text.contains("data: [DONE]"), "{text}");
+    assert!(
+        text.contains("data: still-going"),
+        "[DONE] must not end the HTTP message: {text}"
+    );
+
+    client
+        .write_all(b"GET /next HTTP/1.1\r\nHost: flux\r\n\r\n")
+        .await
+        .unwrap();
+    let second = read_until(&mut client, b"ok").await;
+    assert!(String::from_utf8_lossy(&second).contains("ok"));
+    assert_eq!(
+        conns.load(Ordering::SeqCst),
+        1,
+        "pooling must wait for the HTTP chunked terminator, not [DONE]"
+    );
+    server.stop().await;
+}
+
+/// Request JSON is forwarded verbatim and must not affect backend selection.
+#[tokio::test]
+async fn thin_l7_forwards_json_body_and_ignores_it_for_scheduling() {
+    let a_hits = Arc::new(AtomicUsize::new(0));
+    let b_hits = Arc::new(AtomicUsize::new(0));
+    let make = |hits: Arc<AtomicUsize>| -> Handler {
+        Arc::new(move |mut socket| {
+            let hits = hits.clone();
+            Box::pin(async move {
+                let mut buf = Vec::new();
+                let head = match read_http_head(&mut socket, &mut buf).await {
+                    Some(head) => head,
+                    None => return,
+                };
+                drain_fixed_body(&mut socket, &mut buf, &head).await;
+                hits.fetch_add(1, Ordering::SeqCst);
+                let body = b"ok";
+                let response = format!(
+                    "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                    body.len(),
+                    std::str::from_utf8(body).unwrap()
+                );
+                let _ = socket.write_all(response.as_bytes()).await;
+            })
+        })
+    };
+    let backend_a = spawn_backend(make(a_hits.clone()), Arc::new(AtomicUsize::new(0))).await;
+    let backend_b = spawn_backend(make(b_hits.clone()), Arc::new(AtomicUsize::new(0))).await;
+    let server = start_flux_cfg("thin-l7", &[backend_a, backend_b], "roundrobin", 0).await;
+
+    for model in ["alpha", "beta"] {
+        let mut client = TcpStream::connect(server.addr).await.unwrap();
+        let json = format!(r#"{{"model":"{model}","stream":true}}"#);
+        let req = format!(
+            "POST /v1/chat/completions HTTP/1.1\r\nHost: flux\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+            json.len(),
+            json
+        );
+        client.write_all(req.as_bytes()).await.unwrap();
+        let mut out = Vec::new();
+        let _ = tokio::time::timeout(Duration::from_secs(3), client.read_to_end(&mut out))
+            .await
+            .expect("proxy hung");
+        assert!(String::from_utf8_lossy(&out).contains("ok"));
+    }
+
+    assert_eq!(
+        a_hits.load(Ordering::SeqCst),
+        1,
+        "roundrobin should split regardless of JSON model"
+    );
+    assert_eq!(
+        b_hits.load(Ordering::SeqCst),
+        1,
+        "roundrobin should split regardless of JSON model"
+    );
+    server.stop().await;
+}
+
+#[tokio::test]
+async fn thin_l7_echoes_request_body_verbatim() {
+    let conns = Arc::new(AtomicUsize::new(0));
+    let handler: Handler = Arc::new(|mut socket| {
+        Box::pin(async move {
+            let mut buf = Vec::new();
+            let head = match read_http_head(&mut socket, &mut buf).await {
+                Some(head) => head,
+                None => return,
+            };
+            let head_text = String::from_utf8_lossy(&head);
+            let len = head_text
+                .lines()
+                .find_map(|line| {
+                    let (name, value) = line.split_once(':')?;
+                    if name.eq_ignore_ascii_case("content-length") {
+                        value.trim().parse::<usize>().ok()
+                    } else {
+                        None
+                    }
+                })
+                .unwrap_or(0);
+            while buf.len() < len {
+                let mut tmp = [0u8; 1024];
+                let n = socket.read(&mut tmp).await.unwrap();
+                if n == 0 {
+                    break;
+                }
+                buf.extend_from_slice(&tmp[..n]);
+            }
+            buf.truncate(len);
+            let response = format!(
+                "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                buf.len()
+            );
+            let _ = socket.write_all(response.as_bytes()).await;
+            let _ = socket.write_all(&buf).await;
+        })
+    });
+    let backend = spawn_backend(handler, conns.clone()).await;
+    let server = start_flux("thin-l7", &[backend]).await;
+
+    let payload = br#"{"model":"should-not-parse","messages":[{"role":"user","content":"data: [DONE]\n\n"}]}"#;
+    let mut client = TcpStream::connect(server.addr).await.unwrap();
+    let req = format!(
+        "POST /v1/chat HTTP/1.1\r\nHost: flux\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+        payload.len()
+    );
+    client.write_all(req.as_bytes()).await.unwrap();
+    client.write_all(payload).await.unwrap();
+    let mut out = Vec::new();
+    client.read_to_end(&mut out).await.unwrap();
+    let idx = find(&out, b"\r\n\r\n").expect("missing head");
+    assert_eq!(&out[idx + 4..], payload);
+    server.stop().await;
+}
+
+/// A truncated response after the first byte must not be retried on another backend.
+#[tokio::test]
+async fn thin_l7_does_not_retry_after_first_response_byte() {
+    let a_hits = Arc::new(AtomicUsize::new(0));
+    let b_hits = Arc::new(AtomicUsize::new(0));
+    let dying: Handler = {
+        let a_hits = a_hits.clone();
+        Arc::new(move |mut socket| {
+            let a_hits = a_hits.clone();
+            Box::pin(async move {
+                let mut buf = Vec::new();
+                if read_http_head(&mut socket, &mut buf).await.is_none() {
+                    return;
+                }
+                a_hits.fetch_add(1, Ordering::SeqCst);
+                let head =
+                    b"HTTP/1.1 200 OK\r\nContent-Length: 20\r\nConnection: close\r\n\r\npartial";
+                let _ = socket.write_all(head).await;
+                let _ = socket.shutdown().await;
+            })
+        })
+    };
+    let healthy: Handler = {
+        let b_hits = b_hits.clone();
+        Arc::new(move |mut socket| {
+            let b_hits = b_hits.clone();
+            Box::pin(async move {
+                let mut buf = Vec::new();
+                if read_http_head(&mut socket, &mut buf).await.is_none() {
+                    return;
+                }
+                b_hits.fetch_add(1, Ordering::SeqCst);
+                let _ = socket
+                    .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 4\r\n\r\nfull")
+                    .await;
+            })
+        })
+    };
+    let a = spawn_backend(dying, Arc::new(AtomicUsize::new(0))).await;
+    let b = spawn_backend(healthy, Arc::new(AtomicUsize::new(0))).await;
+    let server = start_flux_cfg("thin-l7", &[a, b], "roundrobin", 2).await;
+
+    let mut client = TcpStream::connect(server.addr).await.unwrap();
+    client
+        .write_all(b"GET / HTTP/1.1\r\nHost: flux\r\n\r\n")
+        .await
+        .unwrap();
+    let mut out = Vec::new();
+    let _ = tokio::time::timeout(Duration::from_secs(3), client.read_to_end(&mut out))
+        .await
+        .expect("proxy hung on truncated response");
+    let text = String::from_utf8_lossy(&out);
+    assert!(text.contains("partial"), "{text}");
+    assert!(!text.contains("full"), "retried after first byte: {text}");
+    assert_eq!(a_hits.load(Ordering::SeqCst), 1);
+    assert_eq!(
+        b_hits.load(Ordering::SeqCst),
+        0,
+        "must not redispatch after response bytes have flowed"
+    );
+    server.stop().await;
+}
+
+/// Connect failures may redispatch to another backend before any response byte.
+#[tokio::test]
+async fn thin_l7_redispatches_on_connect_failure() {
+    let live_hits = Arc::new(AtomicUsize::new(0));
+    let live: Handler = {
+        let live_hits = live_hits.clone();
+        Arc::new(move |mut socket| {
+            let live_hits = live_hits.clone();
+            Box::pin(async move {
+                let mut buf = Vec::new();
+                if read_http_head(&mut socket, &mut buf).await.is_none() {
+                    return;
+                }
+                live_hits.fetch_add(1, Ordering::SeqCst);
+                let _ = socket
+                    .write_all(
+                        b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: close\r\n\r\nok",
+                    )
+                    .await;
+            })
+        })
+    };
+    let dead_listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let dead = dead_listener.local_addr().unwrap();
+    drop(dead_listener);
+    let live_addr = spawn_backend(live, Arc::new(AtomicUsize::new(0))).await;
+    let server = start_flux_cfg("thin-l7", &[dead, live_addr], "leastconn", 2).await;
+
+    let mut client = TcpStream::connect(server.addr).await.unwrap();
+    client
+        .write_all(b"GET / HTTP/1.1\r\nHost: flux\r\n\r\n")
+        .await
+        .unwrap();
+    let mut out = Vec::new();
+    tokio::time::timeout(Duration::from_secs(3), client.read_to_end(&mut out))
+        .await
+        .expect("did not redispatch to the live backend")
+        .unwrap();
+    assert!(
+        String::from_utf8_lossy(&out).contains("ok"),
+        "{}",
+        String::from_utf8_lossy(&out)
+    );
+    assert_eq!(live_hits.load(Ordering::SeqCst), 1);
+    server.stop().await;
+}
+
+/// 1xx is HTTP framing and must be forwarded; the connection is still reusable.
+#[tokio::test]
+async fn thin_l7_forwards_informational_then_final() {
+    let conns = Arc::new(AtomicUsize::new(0));
+    let handler: Handler = Arc::new(|mut socket| {
+        Box::pin(async move {
+            let mut leftover = Vec::new();
+            for i in 0..2 {
+                let req_head = match read_http_head(&mut socket, &mut leftover).await {
+                    Some(head) => head,
+                    None => return,
+                };
+                drain_fixed_body(&mut socket, &mut leftover, &req_head).await;
+                if i == 0 {
+                    let _ = socket.write_all(b"HTTP/1.1 100 Continue\r\n\r\n").await;
+                    let _ = socket
+                        .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 4\r\nConnection: keep-alive\r\n\r\ndone")
+                        .await;
+                } else {
+                    let _ = socket
+                        .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 3\r\nConnection: keep-alive\r\n\r\nbye")
+                        .await;
+                }
+            }
+        })
+    });
+    let backend = spawn_backend(handler, conns.clone()).await;
+    let server = start_flux("thin-l7", &[backend]).await;
+
+    let mut client = TcpStream::connect(server.addr).await.unwrap();
+    client
+        .write_all(b"POST /upload HTTP/1.1\r\nHost: flux\r\nContent-Length: 4\r\n\r\nbody")
+        .await
+        .unwrap();
+    let first = read_until(&mut client, b"done").await;
+    let text = String::from_utf8_lossy(&first);
+    assert!(text.contains("100 Continue"), "{text}");
+    assert!(text.contains("200 OK"), "{text}");
+    assert!(text.contains("done"), "{text}");
+
+    client
+        .write_all(b"GET /next HTTP/1.1\r\nHost: flux\r\n\r\n")
+        .await
+        .unwrap();
+    let second = read_until(&mut client, b"bye").await;
+    assert!(String::from_utf8_lossy(&second).contains("bye"));
     assert_eq!(conns.load(Ordering::SeqCst), 1);
     server.stop().await;
 }

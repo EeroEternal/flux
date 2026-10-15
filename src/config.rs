@@ -185,7 +185,9 @@ pub enum Algorithm {
     Roundrobin,
 }
 
-/// Retry policy. Retries only ever apply before any response byte is observed.
+/// Retry policy. Retries only ever apply to connection establishment, before
+/// any response byte. Each attempt redispatches to a different healthy backend
+/// when one is available.
 #[derive(Debug, Clone, Default, Deserialize)]
 pub struct RetryConfig {
     /// Maximum connection-establishment retries. `0` disables retries entirely.

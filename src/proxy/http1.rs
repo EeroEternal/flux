@@ -4,6 +4,8 @@
 //! so that (a) request/response heads can be forwarded verbatim, (b) bodies can
 //! be streamed through without buffering, and (c) a backend connection can be
 //! safely returned to the pool once a response has been fully consumed.
+//!
+//! Payload bytes are opaque: this module does not inspect SSE, NDJSON or JSON.
 
 use super::{read_with_idle, write_all_with_idle};
 use std::io;
@@ -534,6 +536,18 @@ mod tests {
         let mut scanner = ChunkScanner::new();
         let body = b"4;foo=bar\r\nWiki\r\n0\r\nX-Trace: abc\r\n\r\n";
         let consumed = scanner.consume(body);
+        assert!(scanner.is_done());
+        assert_eq!(consumed, body.len());
+    }
+
+    #[test]
+    fn chunk_scanner_ignores_sse_done_inside_payload() {
+        let mut scanner = ChunkScanner::new();
+        let event = b"data: [DONE]\n\n";
+        let mut body = format!("{:x}\r\n", event.len()).into_bytes();
+        body.extend_from_slice(event);
+        body.extend_from_slice(b"\r\n5\r\nstill\r\n0\r\n\r\n");
+        let consumed = scanner.consume(&body);
         assert!(scanner.is_done());
         assert_eq!(consumed, body.len());
     }

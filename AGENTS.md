@@ -29,6 +29,7 @@ needs **≥ 2 independent occurrences** and human review.
 | Push / PR | skill [`pre-push-local-gates`](.agents/skills/pre-push-local-gates/SKILL.md) |
 | Tag / release / deploy | skill [`release`](.agents/skills/release/SKILL.md) |
 | Code review / acceptance | skill [`review`](.agents/skills/review/SKILL.md) |
+| Payload parsing, model routing, "AI-aware" features | Constraint 9 + [`docs/ai/agents/engineering.md`](docs/ai/agents/engineering.md) §9 |
 
 ## Always Active (Highest Standing Constraints)
 
@@ -53,6 +54,12 @@ needs **≥ 2 independent occurrences** and human review.
    the L4 splice byte-for-byte, preserving the bytes already buffered.
 8. **Pre-push local quality gate.** Never use CI as a local sandbox. Run
    `scripts/local-gates.sh` (fmt, clippy `-D warnings`, tests) before pushing.
+9. **LB boundary (HAProxy position).** Flux forwards bytes, not tokens.
+   Inspect only framing needed to pick a backend, reuse a connection, or
+   tear one down (TCP, HTTP heads, Content-Length/chunked, protocol sniff).
+   Never parse SSE, NDJSON, JSON, or any payload semantic. Scheduling keys
+   are in-flight counts, health, request heads, or out-of-band load — never
+   the body. Pooling is an HTTP message boundary, not `[DONE]`.
 
 ## Skills Index
 

@@ -1,9 +1,9 @@
-//! Flux: a streaming-first AI load balancer.
+//! Flux: a streaming-first load balancer for AI inference gateways.
 //!
-//! Flux sits in front of one or more AI gateway instances and forwards
-//! long-lived, non-idempotent streaming requests with minimal added latency.
-//! It deliberately does **not** implement model routing, billing, prompt
-//! rewriting or protocol translation. See the README for the design rationale.
+//! Flux occupies the HAProxy role in front of gateway instances: connection
+//! management, scheduling, health checks, timeouts and transparent forwarding.
+//! It forwards bytes, not tokens. Model routing, billing, prompt rewriting and
+//! protocol translation stay in the backends.
 
 #![forbid(unsafe_code)]
 

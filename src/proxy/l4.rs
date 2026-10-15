@@ -262,19 +262,33 @@ where
 }
 
 /// Select a backend and establish a connection, honoring the retry policy.
+///
+/// Retries apply only to connection establishment (never after a response
+/// byte). Each failed attempt redispatches to a different healthy backend
+/// when one is available; if every backend has been tried, further attempts
+/// may reuse the original set so a single backend can recover from a
+/// transient refuse.
 pub(crate) async fn connect(state: &AppState) -> anyhow::Result<(Lease, TcpStream)> {
     let mut last_error: Option<io::Error> = None;
+    let mut skip = Vec::new();
     for attempt in 0..=state.config.retry.max_retries {
-        let lease = match state.scheduler.select() {
+        let lease = match state.scheduler.select_skipping(&skip) {
             Some(lease) => lease,
-            None => {
-                state.metrics.rejected("unhealthy");
-                anyhow::bail!("no healthy backend available");
-            }
+            None => match state.scheduler.select() {
+                Some(lease) => lease,
+                None => {
+                    state.metrics.rejected("unhealthy");
+                    anyhow::bail!("no healthy backend available");
+                }
+            },
         };
+        let addr = lease.backend().addr;
         match lease.backend().acquire().await {
             Ok(conn) => return Ok((lease, conn)),
             Err(e) => {
+                if !skip.contains(&addr) {
+                    skip.push(addr);
+                }
                 last_error = Some(e);
                 if attempt < state.config.retry.max_retries {
                     tokio::time::sleep(Duration::from_millis(20 * (attempt as u64 + 1))).await;

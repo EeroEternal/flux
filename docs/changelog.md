@@ -10,6 +10,19 @@ Write bullets that a human can ship from: **what changed**, **who it affects**,
 
 ## [Unreleased]
 
+### Changed
+
+- Documented the HAProxy-like LB boundary: Flux inspects HTTP/TCP framing only
+  and never payload semantics (SSE, JSON, tokens). Metric help strings now say
+  TTFB, not token-aware TTFT. Prometheus names are unchanged.
+
+### Fixed
+
+- First-byte histograms are recorded only on the first response head, not again
+  after a 1xx informational response.
+- Connect retries redispatch to a different healthy backend when one is
+  available, instead of leastconn repeatedly picking the same refused server.
+
 ## [0.0.1] - 2026-10-14
 
 ### Added

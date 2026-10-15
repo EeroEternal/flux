@@ -1,18 +1,17 @@
 # Flux
 
 **Flux** is a streaming-first load balancer for AI inference gateways. It sits
-in front of one or more gateway instances (`xg` / `xlite` / `xgateway`) and
+in front of one or more gateway instances and
 forwards long-lived, non-idempotent streaming POSTs with as little added latency
 as possible.
 
-Flux is *not* an API gateway. Model selection, token accounting, prompt
-rewriting and protocol translation stay in the backends. Flux only does
-connection management, scheduling, health checking, timeouts and transparent
-forwarding.
+Flux occupies the HAProxy role: it forwards bytes, not tokens. Model selection,
+token accounting, prompt rewriting and protocol translation stay in the
+backends. Flux only does connection management, scheduling, health checking,
+timeouts and transparent forwarding.
 
 > Why *Flux*? A short name for the thing that matters here: a long-lived,
-> continuously flowing stream. It also avoids colliding with xgateway / xlite /
-> unigateway.
+> continuously flowing stream.
 
 ## What is implemented
 
@@ -159,9 +158,9 @@ Every metric is exposed on `GET /metrics`.
 
 | Metric | Type | Meaning |
 |--------|------|---------|
-| `flux_ttft_delta_ms` | histogram | Proxy-added first-byte latency (backend first byte → client first byte) |
-| `flux_upstream_ttft_ms` | histogram | Request fully sent → backend first byte |
-| `flux_client_ttft_ms` | histogram | Request fully sent → client first byte |
+| `flux_ttft_delta_ms` | histogram | Proxy-added first-byte latency (TTFB, not first token) |
+| `flux_upstream_ttft_ms` | histogram | Request fully sent → backend first byte (TTFB) |
+| `flux_client_ttft_ms` | histogram | Request fully sent → client first byte (TTFB) |
 | `flux_stream_duration_seconds` | histogram | Whole stream duration |
 | `flux_active_streams{backend}` | gauge | In-flight streams |
 | `flux_conn_reuse_total{backend}` | counter | Connections taken from the idle pool |

@@ -1,9 +1,10 @@
 //! Thin L7 forwarding.
 //!
 //! Flux parses only the request/response heads, then streams bodies verbatim.
-//! Because it knows exactly where a response body ends, it can safely return a
-//! backend connection to the pool and serve subsequent requests on a client
-//! keep-alive connection from any backend.
+//! Bodies are opaque: no SSE, NDJSON or JSON inspection. Because it knows
+//! exactly where a response body ends (HTTP framing, not `[DONE]`), it can
+//! safely return a backend connection to the pool and serve subsequent requests
+//! on a client keep-alive connection from any backend.
 //!
 //! When the first bytes look like something other than HTTP/1.1 — TLS, HTTP/2,
 //! WebSocket/CONNECT upgrades, or an arbitrary binary protocol — Flux stops
@@ -226,7 +227,7 @@ struct ResponseOutcome {
     client_persistent: bool,
 }
 
-#[allow(clippy::too_many_arguments)]
+#[allow(clippy::too_many_arguments)] // reason: response path needs timeouts, buffers, metrics without a context struct
 async fn forward_response<S>(
     client: &mut S,
     conn: &mut TcpStream,
@@ -252,7 +253,8 @@ where
                     "backend closed before sending a final response",
                 )
             })?;
-        if backend_first_byte.is_none() {
+        let is_first_head = backend_first_byte.is_none();
+        if is_first_head {
             backend_first_byte = Some(Instant::now());
         }
         let parsed = http1::parse_response(&head)
@@ -260,16 +262,20 @@ where
         let interim = (100..200).contains(&parsed.status) && parsed.status != 101;
         let client_first_byte = Instant::now();
         write_all_with_idle(client, &head, idle, deadline).await?;
-        if let Some(backend_ts) = backend_first_byte {
-            metrics
-                .ttft_delta_ms
-                .observe((client_first_byte - backend_ts).as_secs_f64() * 1000.0);
-            metrics
-                .upstream_ttft_ms
-                .observe((backend_ts - request_done).as_secs_f64() * 1000.0);
-            metrics
-                .client_ttft_ms
-                .observe((client_first_byte - request_done).as_secs_f64() * 1000.0);
+        // First-byte histograms measure TTFB, not first token. Record once,
+        // including when the first head is a 1xx informational response.
+        if is_first_head {
+            if let Some(backend_ts) = backend_first_byte {
+                metrics
+                    .ttft_delta_ms
+                    .observe((client_first_byte - backend_ts).as_secs_f64() * 1000.0);
+                metrics
+                    .upstream_ttft_ms
+                    .observe((backend_ts - request_done).as_secs_f64() * 1000.0);
+                metrics
+                    .client_ttft_ms
+                    .observe((client_first_byte - request_done).as_secs_f64() * 1000.0);
+            }
         }
         if interim {
             continue;
