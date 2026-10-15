@@ -102,7 +102,7 @@ TLS 终止与 l4/thin-l7 模式正交：l4 下仍做字节拼接，thin-l7 下�
 - L7：解析 head 后，body 用 16 KiB 缓冲逐块透传，绝不聚合。
 
 ### 5.3 超时模型
-`connect`（5s）、`idle`（600s，流静默）、`total`（3600s）、`fin`（30s）。
+`connect`（5s）、可选 `first_byte`（首包 TTFB 预算，未配时默认同 `idle`；`thin-l7` 下首包超时返回 `504 Gateway Timeout`）、`idle`（600s，流内静默）、`total`（3600s）、`fin`（30s）。
 
 ### 5.4 调度
 加权 leastconn：选择 `active/weight` 最小的健康后端，避免长流把新请求堆到忙节点。

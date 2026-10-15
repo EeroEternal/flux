@@ -78,7 +78,11 @@ pub struct TimeoutConfig {
         default = "default_connect_timeout"
     )]
     pub connect: Duration,
-    /// Maximum silence on any single direction before the stream is aborted.
+    /// Optional timeout waiting for the backend's first response byte (TTFB).
+    /// When omitted, defaults to `idle`.
+    #[serde(default, deserialize_with = "duration::deserialize_opt")]
+    pub first_byte: Option<Duration>,
+    /// Maximum silence on any single direction once response bytes are flowing.
     #[serde(
         deserialize_with = "duration::deserialize",
         default = "default_idle_timeout"
@@ -98,10 +102,19 @@ pub struct TimeoutConfig {
     pub fin: Duration,
 }
 
+impl TimeoutConfig {
+    /// Effective timeout waiting for the backend's first response byte.
+    /// Falls back to [`Self::idle`] when [`Self::first_byte`] is not set.
+    pub fn effective_first_byte(&self) -> Duration {
+        self.first_byte.unwrap_or(self.idle)
+    }
+}
+
 impl Default for TimeoutConfig {
     fn default() -> Self {
         Self {
             connect: default_connect_timeout(),
+            first_byte: None,
             idle: default_idle_timeout(),
             total: default_total_timeout(),
             fin: default_fin_timeout(),
@@ -248,11 +261,28 @@ impl Config {
         {
             anyhow::bail!("invalid server.bind: {:?}", self.server.bind);
         }
+        if self.timeouts.connect.is_zero() {
+            anyhow::bail!("timeouts.connect must be greater than zero");
+        }
         if self.timeouts.idle.is_zero() {
             anyhow::bail!("timeouts.idle must be greater than zero");
         }
+        if self.timeouts.fin.is_zero() {
+            anyhow::bail!("timeouts.fin must be greater than zero");
+        }
+        if self.timeouts.total < self.timeouts.connect {
+            anyhow::bail!("timeouts.total must be >= timeouts.connect");
+        }
         if self.timeouts.total < self.timeouts.idle {
             anyhow::bail!("timeouts.total must be >= timeouts.idle");
+        }
+        if let Some(first_byte) = self.timeouts.first_byte {
+            if first_byte.is_zero() {
+                anyhow::bail!("timeouts.first_byte must be greater than zero");
+            }
+            if self.timeouts.total < first_byte {
+                anyhow::bail!("timeouts.total must be >= timeouts.first_byte");
+            }
         }
         if self.server.tls.enabled
             && (self.server.tls.cert.is_none() || self.server.tls.key.is_none())
@@ -375,11 +405,60 @@ max_retries = 0
     fn parses_sample() {
         let config = Config::from_toml(SAMPLE).unwrap();
         assert_eq!(config.server.mode, Mode::L4);
+        assert_eq!(config.timeouts.first_byte, None);
+        assert_eq!(
+            config.timeouts.effective_first_byte(),
+            Duration::from_secs(600)
+        );
         assert_eq!(config.timeouts.idle, Duration::from_secs(600));
         assert_eq!(config.backends.servers.len(), 2);
         assert_eq!(config.backends.algorithm, Algorithm::Leastconn);
         assert_eq!(config.backends.servers[1].weight, 2);
         assert_eq!(config.pool.max_idle_per_backend, 64);
+    }
+
+    #[test]
+    fn validates_first_byte_timeout() {
+        let valid = r#"
+[server]
+bind = "0.0.0.0:8006"
+[timeouts]
+first_byte = "30s"
+idle = "15s"
+total = "600s"
+[backends]
+[[backends.servers]]
+addr = "127.0.0.1:8001"
+"#;
+        let cfg = Config::from_toml(valid).unwrap();
+        assert_eq!(cfg.timeouts.effective_first_byte(), Duration::from_secs(30));
+        assert_eq!(cfg.timeouts.idle, Duration::from_secs(15));
+
+        let zero = r#"
+[server]
+bind = "0.0.0.0:8006"
+[timeouts]
+first_byte = "0s"
+idle = "15s"
+total = "600s"
+[backends]
+[[backends.servers]]
+addr = "127.0.0.1:8001"
+"#;
+        assert!(Config::from_toml(zero).is_err());
+
+        let exceeds_total = r#"
+[server]
+bind = "0.0.0.0:8006"
+[timeouts]
+first_byte = "700s"
+idle = "15s"
+total = "600s"
+[backends]
+[[backends.servers]]
+addr = "127.0.0.1:8001"
+"#;
+        assert!(Config::from_toml(exceeds_total).is_err());
     }
 
     #[test]

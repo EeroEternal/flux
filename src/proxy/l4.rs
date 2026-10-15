@@ -36,6 +36,7 @@ enum Role {
 struct Activity {
     start: Instant,
     last_millis: AtomicU64,
+    backend_responded: std::sync::atomic::AtomicBool,
     first_backend_read: Mutex<Option<Instant>>,
     first_client_write: Mutex<Option<Instant>>,
 }
@@ -45,6 +46,7 @@ impl Activity {
         Self {
             start: Instant::now(),
             last_millis: AtomicU64::new(0),
+            backend_responded: std::sync::atomic::AtomicBool::new(false),
             first_backend_read: Mutex::new(None),
             first_client_write: Mutex::new(None),
         }
@@ -61,9 +63,13 @@ impl Activity {
         Duration::from_millis(now.saturating_sub(last))
     }
 
+    fn has_backend_read(&self) -> bool {
+        self.backend_responded.load(Ordering::Relaxed)
+    }
+
     fn on_read(&self, role: Role) {
         self.touch();
-        if role == Role::Backend {
+        if role == Role::Backend && !self.backend_responded.swap(true, Ordering::Relaxed) {
             if let Ok(mut slot) = self.first_backend_read.lock() {
                 if slot.is_none() {
                     *slot = Some(Instant::now());
@@ -185,6 +191,7 @@ where
     S: AsyncRead + AsyncWrite + Unpin + Send + 'static,
 {
     let started = Instant::now();
+    let first_byte = state.config.timeouts.effective_first_byte();
     let idle = state.config.timeouts.idle;
     let total = state.config.timeouts.total;
 
@@ -201,13 +208,19 @@ where
     let watchdog = {
         let activity = activity.clone();
         let notify = notify.clone();
+        let min_budget = idle.min(first_byte);
         let tick = Duration::from_millis(250)
-            .min(idle / 2)
+            .min(min_budget / 2)
             .max(Duration::from_millis(10));
         tokio::spawn(async move {
             loop {
                 tokio::time::sleep(tick).await;
-                if activity.idle_for() >= idle {
+                let budget = if activity.has_backend_read() {
+                    idle
+                } else {
+                    first_byte
+                };
+                if activity.idle_for() >= budget {
                     notify.notify_one();
                     return;
                 }
