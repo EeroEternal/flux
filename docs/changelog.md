@@ -10,54 +10,70 @@ Write bullets that a human can ship from: **what changed**, **who it affects**,
 
 ## [Unreleased]
 
+## [0.0.2] - 2026-10-16
+
 ### Added
 
 - **Passive dial-failure ejection (`backends.passive_unhealthy_threshold` & `backends.eject_cooldown`)**:
-  optional data-plane circuit breaking that marks a backend unhealthy after N
-  consecutive TCP dial failures without waiting for the next active `/health`
-  tick (preventing `leastconn` from routing traffic to a dead `active = 0`
-  backend between probes), purges its idle connection pool, and automatically
-  re-admits it after `eject_cooldown` (default `5s`).
+  optional data-plane circuit breaking (default `0` = disabled) that marks a
+  backend unhealthy after N consecutive TCP dial failures without waiting for
+  the next active `/health` tick, purges its idle connection pool, and
+  automatically re-admits it after `eject_cooldown` (default `5s`) unless
+  active health probes have marked it unhealthy (`src/backend.rs`,
+  `src/config.rs`). Breaking: No.
 - **Stale pooled connection redial (`thin-l7`)**: when a pooled keep-alive
   connection (`reused = true`) races with a backend keep-alive close (failing on
-  request write or returning an immediate 0-byte EOF before any response byte),
-  `thin-l7` transparently dials a fresh connection once instead of surfacing a
-  broken stream to the client.
+  request write or returning an immediate 0-byte EOF/RST before any response
+  byte), `thin-l7` transparently dials a fresh connection once on the same lease
+  instead of surfacing a broken stream to the client (`src/proxy/l7.rs`).
+  Breaking: No.
 - **Per-backend concurrency cap (`pool.max_conns_per_backend` & `pool.acquire_timeout`)**:
   optional per-backend in-flight connection limit (default `0` = unlimited) with
   bounded queue wait (`pool.acquire_timeout`, defaulting to `timeouts.connect`)
-  and capacity-aware scheduling spillover across healthy backends. When a
-  backend's slot wait expires, xFlux increments
+  and capacity-aware scheduling spillover across healthy backends. When slot
+  acquisition times out, xFlux increments
   `xflux_rejected_total{reason="queue_full"}` and returns `503 Service Unavailable`
-  in `thin-l7` mode.
+  in `thin-l7` mode (`src/backend.rs`, `src/proxy/l4.rs`, `src/proxy/l7.rs`).
+  Breaking: No.
 - **Phased stream timeouts (`timeouts.first_byte` vs `timeouts.idle`)**: optional
   `timeouts.first_byte` decouples the pre-response TTFB budget from the in-stream
   chunk silence timeout (`timeouts.idle`, which remains the fallback when
   `first_byte` is omitted). In `thin-l7`, a timeout before any response byte is
-  written to the client now returns `504 Gateway Timeout` and increments
-  `xflux_rejected_total{reason="timeout"}`.
+  written to the client returns `504 Gateway Timeout` and increments
+  `xflux_rejected_total{reason="timeout"}` (`src/config.rs`, `src/proxy/l4.rs`,
+  `src/proxy/l7.rs`). Breaking: No.
+- **Local pre-push CI hook & console-kit skills**: added `.githooks/pre-push`
+  and `scripts/install-hooks.sh` to run `scripts/local-gates.sh` automatically
+  before `git push`, plus path-filtered CI in `.github/workflows/ci.yml` and
+  `git-stash-safe`, `promote-lesson`, and `ci-concurrency-optimization` skills
+  under `.agents/skills/`. Breaking: No.
 
 ### Changed
 
 - **LIFO idle connection pooling**: `ConnPool` now checks out the most recently
-  returned connection first (`pop_back`) to maximize socket warmth and avoid
-  peer keep-alive races, while evicting expired/oldest connections from the
-  front (`pop_front`).
-
+  returned connection first (`pop_back`) to maximize socket warmth and reduce
+  peer keep-alive close races, while evicting expired/oldest connections from
+  the front (`pop_front`) (`src/pool.rs`). Breaking: No.
 - **Renamed project to xFlux (`xflux`)**: crate, binary (`xflux`), server type
   (`XFluxServer`), health probe `User-Agent` (`xflux-health`), JSON log env var
   (`XFLUX_LOG_JSON`), default log filter (`xflux=info`), and all Prometheus
   metric names (`xflux_*`) are unified under the `xflux` namespace.
-- Documented the HAProxy-like LB boundary: xFlux inspects HTTP/TCP framing only
-  and never payload semantics (SSE, JSON, tokens). Metric help strings now say
-  TTFB, not token-aware TTFT.
+  Breaking: Yes (binary name, `XFLUX_LOG_JSON` env var, and `xflux_*` Prometheus
+  metric prefix replace `flux` / `FLUX_LOG_JSON` / `flux_*`).
+- **Documented HAProxy-like LB boundary**: xFlux inspects HTTP/TCP framing only
+  and never payload semantics (SSE, JSON, tokens). Metric help strings now state
+  TTFB rather than token-aware TTFT (`AGENTS.md`, `docs/`). Breaking: No.
 
 ### Fixed
 
 - First-byte histograms are recorded only on the first response head, not again
-  after a 1xx informational response.
+  after a 1xx informational response (`src/proxy/l7.rs`). Breaking: No.
 - Connect retries redispatch to a different healthy backend when one is
-  available, instead of leastconn repeatedly picking the same refused server.
+  available, instead of leastconn repeatedly picking the same refused server
+  (`src/backend.rs`, `src/proxy/l4.rs`). Breaking: No.
+- `504 Gateway Timeout` error responses in `thin-l7` use a fresh write deadline
+  so the status line is still delivered when `first_byte` reaches `total`
+  (`src/proxy/l7.rs`). Breaking: No.
 
 ## [0.0.1] - 2026-10-14
 
