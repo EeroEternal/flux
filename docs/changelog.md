@@ -10,6 +10,15 @@ Write bullets that a human can ship from: **what changed**, **who it affects**,
 
 ## [Unreleased]
 
+### Added
+
+- **Phased stream timeouts (`timeouts.first_byte` vs `timeouts.idle`)**: optional
+  `timeouts.first_byte` decouples the pre-response TTFB budget from the in-stream
+  chunk silence timeout (`timeouts.idle`, which remains the fallback when
+  `first_byte` is omitted). In `thin-l7`, a timeout before any response byte is
+  written to the client now returns `504 Gateway Timeout` and increments
+  `xflux_rejected_total{reason="timeout"}`.
+
 ### Changed
 
 - **Renamed project to xFlux (`xflux`)**: crate, binary (`xflux`), server type

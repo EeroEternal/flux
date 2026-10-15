@@ -110,7 +110,7 @@ where
             Err(e) => {
                 state.metrics.rejected("unhealthy");
                 tracing::debug!(%peer, error = %e, "no backend available");
-                write_error(&mut client, 503, idle, deadline).await;
+                write_error(&mut client, 503, idle).await;
                 break;
             }
         };
@@ -139,16 +139,18 @@ where
 
         let request_done = Instant::now();
         let mut response_buf = ConnBuffer::new();
+        let mut wrote_to_client = false;
         match forward_response(
             &mut client,
             &mut conn,
             &mut response_buf,
             &request,
             max_head,
-            idle,
+            timeouts,
             deadline,
             request_done,
             &state.metrics,
+            &mut wrote_to_client,
         )
         .await
         {
@@ -175,6 +177,12 @@ where
             }
             Err(e) => {
                 backend.record_upstream_error();
+                if e.kind() == io::ErrorKind::TimedOut {
+                    state.metrics.rejected("timeout");
+                    if !wrote_to_client {
+                        write_error(&mut client, 504, idle).await;
+                    }
+                }
                 state
                     .metrics
                     .stream_duration_seconds
@@ -234,18 +242,26 @@ async fn forward_response<S>(
     response_buf: &mut ConnBuffer,
     request: &RequestHead,
     max_head: usize,
-    idle: Duration,
+    timeouts: &crate::config::TimeoutConfig,
     deadline: Instant,
     request_done: Instant,
     metrics: &Metrics,
+    wrote_to_client: &mut bool,
 ) -> io::Result<ResponseOutcome>
 where
     S: AsyncRead + AsyncWrite + Unpin,
 {
+    let first_byte = timeouts.effective_first_byte();
+    let idle = timeouts.idle;
     let mut backend_first_byte: Option<Instant> = None;
     let response;
     loop {
-        let head = http1::read_head(conn, response_buf, max_head, idle, deadline)
+        let head_budget = if backend_first_byte.is_none() {
+            first_byte
+        } else {
+            idle
+        };
+        let head = http1::read_head(conn, response_buf, max_head, head_budget, deadline)
             .await?
             .ok_or_else(|| {
                 io::Error::new(
@@ -261,6 +277,7 @@ where
             .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
         let interim = (100..200).contains(&parsed.status) && parsed.status != 101;
         let client_first_byte = Instant::now();
+        *wrote_to_client = true;
         write_all_with_idle(client, &head, idle, deadline).await?;
         // First-byte histograms measure TTFB, not first token. Record once,
         // including when the first head is a 1xx informational response.
@@ -301,7 +318,7 @@ where
     })
 }
 
-async fn write_error<S>(client: &mut S, status: u16, idle: Duration, deadline: Instant)
+async fn write_error<S>(client: &mut S, status: u16, idle: Duration)
 where
     S: AsyncWrite + Unpin,
 {
@@ -309,9 +326,11 @@ where
         400 => "Bad Request",
         502 => "Bad Gateway",
         503 => "Service Unavailable",
+        504 => "Gateway Timeout",
         _ => "Error",
     };
     let response =
         format!("HTTP/1.1 {status} {reason}\r\nContent-Length: 0\r\nConnection: close\r\n\r\n");
-    let _ = write_all_with_idle(client, response.as_bytes(), idle, deadline).await;
+    let error_deadline = Instant::now() + idle;
+    let _ = write_all_with_idle(client, response.as_bytes(), idle, error_deadline).await;
 }

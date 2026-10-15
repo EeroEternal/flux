@@ -13,6 +13,18 @@ where
     parse(&raw).map_err(serde::de::Error::custom)
 }
 
+/// Deserialize an optional duration from a human readable string.
+pub fn deserialize_opt<'de, D>(deserializer: D) -> Result<Option<Duration>, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    let raw = Option::<String>::deserialize(deserializer)?;
+    match raw {
+        Some(s) => parse(&s).map(Some).map_err(serde::de::Error::custom),
+        None => Ok(None),
+    }
+}
+
 /// Parse a human readable duration.
 pub fn parse(input: &str) -> Result<Duration, String> {
     let s = input.trim();

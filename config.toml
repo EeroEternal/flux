@@ -17,6 +17,7 @@ max_header_bytes = 65536       # thin-l7 only
 
 [timeouts]
 connect = "5s"
+# first_byte = "60s"           # optional TTFB budget before first response byte (defaults to idle)
 idle = "600s"
 total = "3600s"
 fin = "30s"

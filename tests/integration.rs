@@ -1038,3 +1038,151 @@ async fn thin_l7_forwards_informational_then_final() {
     assert_eq!(conns.load(Ordering::SeqCst), 1);
     server.stop().await;
 }
+
+async fn start_xflux_with_timeouts(
+    mode: &str,
+    backend: SocketAddr,
+    first_byte: &str,
+    idle: &str,
+    total: &str,
+) -> XFluxServer {
+    let text = format!(
+        r#"
+[server]
+bind = "127.0.0.1:0"
+mode = "{mode}"
+
+[timeouts]
+connect = "50ms"
+first_byte = "{first_byte}"
+idle = "{idle}"
+total = "{total}"
+fin = "500ms"
+
+[pool]
+max_idle_per_backend = 4
+idle_timeout = "5s"
+
+[backends]
+algorithm = "leastconn"
+health_interval = "0s"
+
+[[backends.servers]]
+addr = "{backend}"
+weight = 1
+"#
+    );
+    let config = Config::from_toml(&text).unwrap();
+    XFluxServer::start(config).await.unwrap()
+}
+
+#[tokio::test]
+async fn thin_l7_enforces_first_byte_timeout_and_returns_504() {
+    let conns = Arc::new(AtomicUsize::new(0));
+    let handler: Handler = Arc::new(|mut socket| {
+        Box::pin(async move {
+            let mut buf = Vec::new();
+            let _ = read_http_head(&mut socket, &mut buf).await;
+            // Stall before sending any response byte.
+            tokio::time::sleep(Duration::from_secs(2)).await;
+        })
+    });
+    let backend = spawn_backend(handler, conns.clone()).await;
+    let server = start_xflux_with_timeouts("thin-l7", backend, "80ms", "50ms", "80ms").await;
+
+    let started = Instant::now();
+    let mut client = TcpStream::connect(server.addr).await.unwrap();
+    client
+        .write_all(b"POST /v1/chat HTTP/1.1\r\nHost: xflux\r\nContent-Length: 2\r\n\r\n{}")
+        .await
+        .unwrap();
+    let mut out = Vec::new();
+    tokio::time::timeout(Duration::from_secs(1), client.read_to_end(&mut out))
+        .await
+        .expect("first_byte timeout did not fire before 1s")
+        .unwrap();
+    let elapsed = started.elapsed();
+    let text = String::from_utf8_lossy(&out);
+    assert!(
+        text.starts_with("HTTP/1.1 504 Gateway Timeout"),
+        "expected 504 Gateway Timeout even when first_byte == total, got: {text:?}"
+    );
+    assert!(
+        elapsed < Duration::from_millis(800),
+        "expected fast first_byte abort, took {elapsed:?}"
+    );
+    server.stop().await;
+}
+
+#[tokio::test]
+async fn thin_l7_allows_slow_first_byte_then_enforces_tight_chunk_idle() {
+    let conns = Arc::new(AtomicUsize::new(0));
+    let handler: Handler = Arc::new(|mut socket| {
+        Box::pin(async move {
+            let mut buf = Vec::new();
+            if read_http_head(&mut socket, &mut buf).await.is_none() {
+                return;
+            }
+            // Prefill takes 150ms (> idle 60ms, but < first_byte 500ms).
+            tokio::time::sleep(Duration::from_millis(150)).await;
+            let head = b"HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nTransfer-Encoding: chunked\r\n\r\n";
+            if socket.write_all(head).await.is_err() {
+                return;
+            }
+            if socket.write_all(&chunk("data: first\n\n")).await.is_err() {
+                return;
+            }
+            // Mid-stream stall for 2s (> idle 60ms): xFlux must abort the stream quickly.
+            tokio::time::sleep(Duration::from_secs(2)).await;
+        })
+    });
+    let backend = spawn_backend(handler, conns.clone()).await;
+    let server = start_xflux_with_timeouts("thin-l7", backend, "500ms", "60ms", "5s").await;
+
+    let started = Instant::now();
+    let mut client = TcpStream::connect(server.addr).await.unwrap();
+    client
+        .write_all(b"GET /stream HTTP/1.1\r\nHost: xflux\r\n\r\n")
+        .await
+        .unwrap();
+    let mut out = Vec::new();
+    tokio::time::timeout(Duration::from_secs(1), client.read_to_end(&mut out))
+        .await
+        .expect("chunk idle timeout did not abort stalled stream")
+        .unwrap();
+    let elapsed = started.elapsed();
+    let text = String::from_utf8_lossy(&out);
+    assert!(text.contains("200 OK"), "{text}");
+    assert!(text.contains("data: first"), "{text}");
+    assert!(
+        elapsed < Duration::from_millis(800),
+        "expected chunk idle abort well under 1s, took {elapsed:?}"
+    );
+    server.stop().await;
+}
+
+#[tokio::test]
+async fn l4_enforces_first_byte_timeout_before_backend_responds() {
+    let conns = Arc::new(AtomicUsize::new(0));
+    let handler: Handler = Arc::new(|mut socket| {
+        Box::pin(async move {
+            let mut buf = [0u8; 64];
+            let _ = socket.read(&mut buf).await;
+            tokio::time::sleep(Duration::from_secs(2)).await;
+        })
+    });
+    let backend = spawn_backend(handler, conns.clone()).await;
+    let server = start_xflux_with_timeouts("l4", backend, "60ms", "2s", "5s").await;
+
+    let started = Instant::now();
+    let mut client = TcpStream::connect(server.addr).await.unwrap();
+    client.write_all(b"ping").await.unwrap();
+    let mut out = Vec::new();
+    tokio::time::timeout(Duration::from_secs(1), client.read_to_end(&mut out))
+        .await
+        .expect("l4 first_byte timeout did not close connection")
+        .unwrap();
+    assert!(out.is_empty());
+    assert!(started.elapsed() < Duration::from_millis(800));
+    server.stop().await;
+}

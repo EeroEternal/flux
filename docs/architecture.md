@@ -97,13 +97,15 @@ without both `cert` and `key`.
 | Timeout | Scope |
 | --- | --- |
 | `connect` | backend connection establishment |
-| `idle` | maximum silence on a direction; L4 via an activity watchdog, L7 via per-read/write timeout |
+| `first_byte` | optional TTFB budget before the backend sends its first response byte (defaults to `idle`); in `thin-l7`, expiry before any response byte is written to the client returns `504 Gateway Timeout` |
+| `idle` | maximum silence on a direction once response bytes are flowing; L4 via an activity watchdog, L7 via per-read/write timeout |
 | `total` | hard ceiling for a whole stream |
 | `fin` | grace period after a half-close in L4 |
 
 The L4 watchdog polls the shared `Activity` (updated on every read/write) and
-notifies a `Notify` when a direction has been silent for `idle`. The splice is
-then cancelled. `total` is a plain sleep raced against the splice.
+notifies a `Notify` when a direction has been silent for `first_byte` (before
+the backend's first byte) or `idle` (afterwards). The splice is then cancelled.
+`total` is a plain sleep raced against the splice.
 
 ## Scheduling and health
 
@@ -121,7 +123,7 @@ then cancelled. `total` is a plain sleep raced against the splice.
 1. No request or response body is ever buffered beyond one bounded read.
 2. A backend connection is pooled only at a proven message boundary.
 3. No request is retried after the first response byte.
-4. `connect <= idle <= total`; `fin` is independent.
+4. `connect <= total`, `idle <= total`, and `first_byte <= total`; `fin` is independent.
 5. Any protocol thin-l7 cannot parse is forwarded byte-for-byte via L4.
 6. Every metric that has a success/increment path has a failure counterpart.
 7. Payload bytes are opaque. xFlux must not parse SSE, NDJSON, JSON, or any

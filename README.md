@@ -21,7 +21,7 @@ timeouts and transparent forwarding.
 | Thin-L7 (head parsing, body streaming) | ✅ request-level connection reuse |
 | Zero response/request buffering | ✅ bodies are copied in bounded chunks |
 | Backend connection pool for all methods | ✅ thin-l7; idle timeout decoupled from stream duration |
-| Layered timeouts (connect / idle / total / fin) | ✅ |
+| Layered timeouts (connect / first_byte / idle / total / fin) | ✅ |
 | Least-connections scheduling (weighted) | ✅ plus round-robin |
 | Health checks on `/health` | ✅ hysteresis, never touches live streams |
 | Retry only before response bytes | ✅ default 0 |
@@ -120,7 +120,8 @@ reuseport = false
 
 [timeouts]
 connect = "5s"            # backend connection establishment
-idle = "600s"             # max silence per direction (covers model thinking)
+# first_byte = "60s"      # optional TTFB limit before first response byte (defaults to idle)
+idle = "600s"             # max silence per direction once streaming
 total = "3600s"           # hard ceiling for a whole stream
 fin = "30s"               # wait after a half-close in l4
 
