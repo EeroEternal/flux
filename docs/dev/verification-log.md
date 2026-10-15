@@ -2,6 +2,28 @@
 
 Evidence recorded while validating Flux. Re-run the commands to reproduce.
 
+## Unreleased — 2026-10-15
+
+### Flux in front of local xlite + stream mock
+
+Harness: `bash docs/dev/verify-with-xlite.sh`
+(mock SSE 8 chunks × 20ms, mock TTFT 30ms, Flux `thin-l7`).
+
+```
+direct  http=200 ttfb=0.0339s total=0.2017s body=2059B
+flux1   http=200 ttfb=0.0320s total=0.1991s body=2059B
+flux2   http=200 ttfb=0.0324s total=0.1995s body=2059B
+ttfb_delta_ms=-1.86
+flux_conn_new_total{backend="127.0.0.1:18080"} 1
+flux_conn_reuse_total{backend="127.0.0.1:18080"} 2
+PASS
+```
+
+- TTFB through Flux matched direct xlite (noise, not added latency).
+- `total - ttfb ≈ 170ms` matches 8×20ms token interval: Flux did not buffer the SSE body.
+- Two client requests plus the proxied `/health` probe reused a single xlite connection.
+- SSE framing (`data:` / `[DONE]`) was forwarded as opaque payload.
+
 ## v0.0.1 — 2026-10-14
 
 ### Local gates
