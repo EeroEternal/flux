@@ -48,7 +48,9 @@ impl ConnPool {
 
     /// Acquire a connection.
     ///
-    /// Returns `(stream, reused)`. Existing idle connections are validated
+    /// Returns `(stream, reused)`. Idle connections are checked out in LIFO
+    /// order (most recently returned first) so the warmest socket is reused
+    /// while cold connections at the front age out. Each candidate is validated
     /// with a non-blocking read: a closed socket or a socket with unexpected
     /// buffered data is discarded. When no healthy idle connection exists a
     /// new one is dialed, bounded by `connect_timeout`.
@@ -56,12 +58,15 @@ impl ConnPool {
         loop {
             let candidate = {
                 let mut guard = self.idle.lock().expect("pool mutex poisoned");
-                guard.pop_front()
+                while guard
+                    .front()
+                    .is_some_and(|i| i.since.elapsed() >= self.idle_timeout)
+                {
+                    guard.pop_front();
+                }
+                guard.pop_back()
             };
             let Some(idle) = candidate else { break };
-            if idle.since.elapsed() >= self.idle_timeout {
-                continue;
-            }
             let stream = idle.stream;
             let mut probe = [0u8; 1];
             match stream.try_read(&mut probe) {
@@ -83,9 +88,15 @@ impl ConnPool {
         Ok((stream, false))
     }
 
-    /// Return a healthy connection to the pool. Connections beyond the idle
-    /// limit, and connections that fail a final liveness probe, are dropped.
+    /// Return a healthy connection to the pool.
+    ///
+    /// Expired connections at the front are reaped first; if the pool is still
+    /// at `max_idle`, the oldest idle connection at the front is evicted so the
+    /// freshly active connection is retained.
     pub fn put(&self, stream: TcpStream) {
+        if self.max_idle == 0 {
+            return;
+        }
         let mut probe = [0u8; 1];
         match stream.try_read(&mut probe) {
             Ok(0) => return,
@@ -94,12 +105,19 @@ impl ConnPool {
             Err(_) => return,
         }
         if let Ok(mut guard) = self.idle.lock() {
-            if guard.len() < self.max_idle {
-                guard.push_back(Idle {
-                    stream,
-                    since: Instant::now(),
-                });
+            while guard
+                .front()
+                .is_some_and(|i| i.since.elapsed() >= self.idle_timeout)
+            {
+                guard.pop_front();
             }
+            if guard.len() >= self.max_idle {
+                guard.pop_front();
+            }
+            guard.push_back(Idle {
+                stream,
+                since: Instant::now(),
+            });
         }
     }
 }
@@ -128,6 +146,40 @@ mod tests {
         pool.put(stream);
         let (_stream, reused) = pool.get(Duration::from_secs(1)).await.unwrap();
         assert!(reused);
+    }
+
+    #[tokio::test]
+    async fn prefers_most_recently_returned_connection_lifo() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            loop {
+                let Ok((mut socket, _)) = listener.accept().await else {
+                    break;
+                };
+                tokio::spawn(async move {
+                    let mut buf = [0u8; 64];
+                    let _ = socket.read(&mut buf).await;
+                });
+            }
+        });
+
+        let pool = ConnPool::new(addr, 4, Duration::from_secs(30));
+        let (c1, _) = pool.get(Duration::from_secs(1)).await.unwrap();
+        let (c2, _) = pool.get(Duration::from_secs(1)).await.unwrap();
+        let port1 = c1.local_addr().unwrap().port();
+        let port2 = c2.local_addr().unwrap().port();
+        pool.put(c1);
+        pool.put(c2);
+
+        // LIFO: c2 was returned last and must be checked out first.
+        let (first_out, reused) = pool.get(Duration::from_secs(1)).await.unwrap();
+        assert!(reused);
+        assert_eq!(first_out.local_addr().unwrap().port(), port2);
+
+        let (second_out, reused) = pool.get(Duration::from_secs(1)).await.unwrap();
+        assert!(reused);
+        assert_eq!(second_out.local_addr().unwrap().port(), port1);
     }
 
     #[tokio::test]

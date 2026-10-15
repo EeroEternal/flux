@@ -1186,3 +1186,146 @@ async fn l4_enforces_first_byte_timeout_before_backend_responds() {
     assert!(started.elapsed() < Duration::from_millis(800));
     server.stop().await;
 }
+
+#[tokio::test]
+async fn thin_l7_max_conns_per_backend_queues_and_reuses_single_connection() {
+    let conns = Arc::new(AtomicUsize::new(0));
+    let handler: Handler = Arc::new(|mut socket| {
+        Box::pin(async move {
+            let mut buf = Vec::new();
+            while let Some(head) = read_http_head(&mut socket, &mut buf).await {
+                drain_fixed_body(&mut socket, &mut buf, &head).await;
+                tokio::time::sleep(Duration::from_millis(80)).await;
+                let response =
+                    b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: keep-alive\r\n\r\nok";
+                if socket.write_all(response).await.is_err() {
+                    return;
+                }
+            }
+        })
+    });
+    let backend = spawn_backend(handler, conns.clone()).await;
+    let text = format!(
+        r#"
+[server]
+bind = "127.0.0.1:0"
+mode = "thin-l7"
+
+[timeouts]
+connect = "1s"
+idle = "2s"
+total = "5s"
+fin = "500ms"
+
+[pool]
+max_idle_per_backend = 4
+max_conns_per_backend = 1
+acquire_timeout = "1s"
+idle_timeout = "5s"
+
+[backends]
+algorithm = "leastconn"
+health_interval = "0s"
+
+[[backends.servers]]
+addr = "{backend}"
+weight = 1
+"#
+    );
+    let server = XFluxServer::start(Config::from_toml(&text).unwrap())
+        .await
+        .unwrap();
+
+    let send_one = |addr: SocketAddr| async move {
+        let mut client = TestClient::connect(addr).await;
+        client.send(b"GET / HTTP/1.1\r\nHost: xflux\r\n\r\n").await;
+        client.read_response().await
+    };
+
+    let (r1, r2) = tokio::join!(send_one(server.addr), send_one(server.addr));
+    assert!(r1.contains("200 OK"), "{r1}");
+    assert!(r2.contains("200 OK"), "{r2}");
+    assert_eq!(
+        conns.load(Ordering::SeqCst),
+        1,
+        "second concurrent request should wait for permit and reuse the single backend connection"
+    );
+    server.stop().await;
+}
+
+#[tokio::test]
+async fn thin_l7_max_conns_per_backend_rejects_with_503_when_acquire_times_out() {
+    let conns = Arc::new(AtomicUsize::new(0));
+    let handler: Handler = Arc::new(|mut socket| {
+        Box::pin(async move {
+            let mut buf = Vec::new();
+            if read_http_head(&mut socket, &mut buf).await.is_none() {
+                return;
+            }
+            tokio::time::sleep(Duration::from_millis(500)).await;
+            let _ = socket
+                .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: close\r\n\r\nok")
+                .await;
+        })
+    });
+    let backend = spawn_backend(handler, conns.clone()).await;
+    let text = format!(
+        r#"
+[server]
+bind = "127.0.0.1:0"
+mode = "thin-l7"
+
+[timeouts]
+connect = "1s"
+idle = "2s"
+total = "5s"
+fin = "500ms"
+
+[pool]
+max_idle_per_backend = 4
+max_conns_per_backend = 1
+acquire_timeout = "60ms"
+idle_timeout = "5s"
+
+[backends]
+algorithm = "leastconn"
+health_interval = "0s"
+
+[[backends.servers]]
+addr = "{backend}"
+weight = 1
+"#
+    );
+    let server = XFluxServer::start(Config::from_toml(&text).unwrap())
+        .await
+        .unwrap();
+
+    let mut first = TcpStream::connect(server.addr).await.unwrap();
+    first
+        .write_all(b"GET /slow HTTP/1.1\r\nHost: xflux\r\nConnection: close\r\n\r\n")
+        .await
+        .unwrap();
+    tokio::time::sleep(Duration::from_millis(20)).await;
+
+    let mut second = TcpStream::connect(server.addr).await.unwrap();
+    second
+        .write_all(b"GET /overflow HTTP/1.1\r\nHost: xflux\r\nConnection: close\r\n\r\n")
+        .await
+        .unwrap();
+    let mut second_out = Vec::new();
+    tokio::time::timeout(Duration::from_secs(1), second.read_to_end(&mut second_out))
+        .await
+        .expect("second request did not time out on acquire_timeout")
+        .unwrap();
+    let second_text = String::from_utf8_lossy(&second_out);
+    assert!(
+        second_text.starts_with("HTTP/1.1 503 Service Unavailable"),
+        "expected 503 Service Unavailable, got: {second_text:?}"
+    );
+
+    let mut first_out = Vec::new();
+    first.read_to_end(&mut first_out).await.unwrap();
+    assert!(String::from_utf8_lossy(&first_out).contains("200 OK"));
+    assert_eq!(conns.load(Ordering::SeqCst), 1);
+    server.stop().await;
+}

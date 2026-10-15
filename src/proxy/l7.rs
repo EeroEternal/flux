@@ -108,7 +108,6 @@ where
         let (lease, mut conn) = match super::l4::connect(&state).await {
             Ok(pair) => pair,
             Err(e) => {
-                state.metrics.rejected("unhealthy");
                 tracing::debug!(%peer, error = %e, "no backend available");
                 write_error(&mut client, 503, idle).await;
                 break;
@@ -158,6 +157,7 @@ where
                 if outcome.reusable {
                     backend.release_conn(conn);
                 }
+                drop(lease);
                 state
                     .metrics
                     .stream_duration_seconds

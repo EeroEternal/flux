@@ -128,12 +128,27 @@ pub struct PoolConfig {
     /// Idle connections kept warm per backend.
     #[serde(default = "default_max_idle")]
     pub max_idle_per_backend: usize,
+    /// Hard cap on concurrent in-flight connections per backend. `0` (default) means unlimited.
+    #[serde(default)]
+    pub max_conns_per_backend: usize,
+    /// Maximum wait for a backend concurrency slot when `max_conns_per_backend > 0`.
+    /// When omitted, defaults to `timeouts.connect`.
+    #[serde(default, deserialize_with = "duration::deserialize_opt")]
+    pub acquire_timeout: Option<Duration>,
     /// How long an idle connection may sit in the pool before it is discarded.
     #[serde(
         deserialize_with = "duration::deserialize",
         default = "default_pool_idle_timeout"
     )]
     pub idle_timeout: Duration,
+}
+
+impl PoolConfig {
+    /// Effective timeout waiting for a backend concurrency slot when
+    /// [`Self::max_conns_per_backend`] is positive. Falls back to `connect`.
+    pub fn effective_acquire_timeout(&self, connect: Duration) -> Duration {
+        self.acquire_timeout.unwrap_or(connect)
+    }
 }
 
 /// Backend selection and health checking.
@@ -182,6 +197,8 @@ impl Default for PoolConfig {
     fn default() -> Self {
         Self {
             max_idle_per_backend: default_max_idle(),
+            max_conns_per_backend: 0,
+            acquire_timeout: None,
             idle_timeout: default_pool_idle_timeout(),
         }
     }
@@ -282,6 +299,11 @@ impl Config {
             }
             if self.timeouts.total < first_byte {
                 anyhow::bail!("timeouts.total must be >= timeouts.first_byte");
+            }
+        }
+        if let Some(acquire_timeout) = self.pool.acquire_timeout {
+            if acquire_timeout.is_zero() {
+                anyhow::bail!("pool.acquire_timeout must be greater than zero");
             }
         }
         if self.server.tls.enabled
@@ -415,6 +437,45 @@ max_retries = 0
         assert_eq!(config.backends.algorithm, Algorithm::Leastconn);
         assert_eq!(config.backends.servers[1].weight, 2);
         assert_eq!(config.pool.max_idle_per_backend, 64);
+        assert_eq!(config.pool.max_conns_per_backend, 0);
+        assert_eq!(
+            config
+                .pool
+                .effective_acquire_timeout(config.timeouts.connect),
+            Duration::from_secs(5)
+        );
+    }
+
+    #[test]
+    fn validates_pool_acquire_timeout() {
+        let valid = r#"
+[server]
+bind = "0.0.0.0:8006"
+[pool]
+max_conns_per_backend = 128
+acquire_timeout = "2s"
+[backends]
+[[backends.servers]]
+addr = "127.0.0.1:8001"
+"#;
+        let cfg = Config::from_toml(valid).unwrap();
+        assert_eq!(cfg.pool.max_conns_per_backend, 128);
+        assert_eq!(
+            cfg.pool.effective_acquire_timeout(cfg.timeouts.connect),
+            Duration::from_secs(2)
+        );
+
+        let zero = r#"
+[server]
+bind = "0.0.0.0:8006"
+[pool]
+max_conns_per_backend = 128
+acquire_timeout = "0s"
+[backends]
+[[backends.servers]]
+addr = "127.0.0.1:8001"
+"#;
+        assert!(Config::from_toml(zero).is_err());
     }
 
     #[test]

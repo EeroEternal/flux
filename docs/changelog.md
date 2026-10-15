@@ -12,6 +12,13 @@ Write bullets that a human can ship from: **what changed**, **who it affects**,
 
 ### Added
 
+- **Per-backend concurrency cap (`pool.max_conns_per_backend` & `pool.acquire_timeout`)**:
+  optional per-backend in-flight connection limit (default `0` = unlimited) with
+  bounded queue wait (`pool.acquire_timeout`, defaulting to `timeouts.connect`)
+  and capacity-aware scheduling spillover across healthy backends. When a
+  backend's slot wait expires, xFlux increments
+  `xflux_rejected_total{reason="queue_full"}` and returns `503 Service Unavailable`
+  in `thin-l7` mode.
 - **Phased stream timeouts (`timeouts.first_byte` vs `timeouts.idle`)**: optional
   `timeouts.first_byte` decouples the pre-response TTFB budget from the in-stream
   chunk silence timeout (`timeouts.idle`, which remains the fallback when
@@ -20,6 +27,11 @@ Write bullets that a human can ship from: **what changed**, **who it affects**,
   `xflux_rejected_total{reason="timeout"}`.
 
 ### Changed
+
+- **LIFO idle connection pooling**: `ConnPool` now checks out the most recently
+  returned connection first (`pop_back`) to maximize socket warmth and avoid
+  peer keep-alive races, while evicting expired/oldest connections from the
+  front (`pop_front`).
 
 - **Renamed project to xFlux (`xflux`)**: crate, binary (`xflux`), server type
   (`XFluxServer`), health probe `User-Agent` (`xflux-health`), JSON log env var

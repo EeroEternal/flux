@@ -9,6 +9,7 @@ use std::sync::atomic::{AtomicBool, AtomicU32, AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::net::TcpStream;
+use tokio::sync::{OwnedSemaphorePermit, Semaphore};
 
 /// A single gateway instance plus its private connection pool.
 pub struct Backend {
@@ -20,6 +21,9 @@ pub struct Backend {
     pub label: String,
     pool: ConnPool,
     connect_timeout: Duration,
+    max_conns: usize,
+    concurrency: Option<Arc<Semaphore>>,
+    acquire_timeout: Duration,
     active: AtomicUsize,
     healthy: AtomicBool,
     success_streak: AtomicU32,
@@ -32,6 +36,11 @@ pub struct Backend {
 impl Backend {
     fn new(addr: SocketAddr, weight: u32, config: &Config, metrics: Arc<Metrics>) -> Arc<Self> {
         let label = addr.to_string();
+        let max_conns = config.pool.max_conns_per_backend;
+        let concurrency = (max_conns > 0).then(|| Arc::new(Semaphore::new(max_conns)));
+        let acquire_timeout = config
+            .pool
+            .effective_acquire_timeout(config.timeouts.connect);
         let backend = Arc::new(Self {
             addr,
             weight,
@@ -42,6 +51,9 @@ impl Backend {
                 config.pool.idle_timeout,
             ),
             connect_timeout: config.timeouts.connect,
+            max_conns,
+            concurrency,
+            acquire_timeout,
             active: AtomicUsize::new(0),
             healthy: AtomicBool::new(true),
             success_streak: AtomicU32::new(0),
@@ -61,6 +73,11 @@ impl Backend {
     /// Current in-flight stream count.
     pub fn active_conns(&self) -> usize {
         self.active.load(Ordering::Relaxed)
+    }
+
+    /// Whether this backend has reached its configured `max_conns_per_backend` cap.
+    pub fn is_at_capacity(&self) -> bool {
+        self.max_conns > 0 && self.active_conns() >= self.max_conns
     }
 
     /// Whether the scheduler may currently pick this backend.
@@ -156,9 +173,11 @@ impl Backend {
     }
 }
 
-/// A scheduling lease. Dropping the lease releases the in-flight slot.
+/// A scheduling lease. Dropping the lease releases the in-flight slot and any
+/// per-backend concurrency permit.
 pub struct Lease {
     backend: Arc<Backend>,
+    permit: Option<OwnedSemaphorePermit>,
 }
 
 impl Lease {
@@ -166,11 +185,43 @@ impl Lease {
     pub fn backend(&self) -> &Arc<Backend> {
         &self.backend
     }
+
+    pub(crate) async fn ensure_permit(&mut self) -> io::Result<()> {
+        if self.permit.is_none() {
+            if let Some(sem) = &self.backend.concurrency {
+                match tokio::time::timeout(
+                    self.backend.acquire_timeout,
+                    sem.clone().acquire_owned(),
+                )
+                .await
+                {
+                    Ok(Ok(permit)) => {
+                        self.permit = Some(permit);
+                    }
+                    Ok(Err(_)) | Err(_) => {
+                        return Err(io::Error::new(
+                            io::ErrorKind::WouldBlock,
+                            "backend max_conns_per_backend limit reached",
+                        ));
+                    }
+                }
+            }
+        }
+        Ok(())
+    }
+
+    /// Acquire a per-backend concurrency permit (when `max_conns_per_backend > 0`)
+    /// and then check out a pooled or freshly dialed backend connection.
+    pub async fn acquire(&mut self) -> io::Result<TcpStream> {
+        self.ensure_permit().await?;
+        self.backend.acquire().await
+    }
 }
 
 impl Drop for Lease {
     fn drop(&mut self) {
         self.backend.on_release();
+        let _ = self.permit.take();
     }
 }
 
@@ -221,19 +272,29 @@ impl Scheduler {
             Algorithm::Roundrobin => self.select_round_robin(skip),
         }?;
         backend.on_select();
-        Some(Lease { backend })
+        Some(Lease {
+            backend,
+            permit: None,
+        })
     }
 
     fn select_leastconn(&self, skip: &[SocketAddr]) -> Option<Arc<Backend>> {
+        let cmp = |a: &&Arc<Backend>, b: &&Arc<Backend>| {
+            // Weighted least-connections: compare active/weight without
+            // floating point by cross multiplying. Lower wins.
+            let lhs = a.active_conns() as u128 * b.weight as u128;
+            let rhs = b.active_conns() as u128 * a.weight as u128;
+            lhs.cmp(&rhs)
+        };
         self.backends
             .iter()
-            .filter(|b| b.is_healthy() && !skip.contains(&b.addr))
-            .min_by(|a, b| {
-                // Weighted least-connections: compare active/weight without
-                // floating point by cross multiplying. Lower wins.
-                let lhs = a.active_conns() as u128 * b.weight as u128;
-                let rhs = b.active_conns() as u128 * a.weight as u128;
-                lhs.cmp(&rhs)
+            .filter(|b| b.is_healthy() && !skip.contains(&b.addr) && !b.is_at_capacity())
+            .min_by(cmp)
+            .or_else(|| {
+                self.backends
+                    .iter()
+                    .filter(|b| b.is_healthy() && !skip.contains(&b.addr))
+                    .min_by(cmp)
             })
             .cloned()
     }
@@ -244,6 +305,13 @@ impl Scheduler {
             return None;
         }
         let start = self.round_robin.fetch_add(1, Ordering::Relaxed);
+        for offset in 0..n {
+            let idx = (start + offset) % n;
+            let backend = &self.backends[idx];
+            if backend.is_healthy() && !skip.contains(&backend.addr) && !backend.is_at_capacity() {
+                return Some(backend.clone());
+            }
+        }
         for offset in 0..n {
             let idx = (start + offset) % n;
             let backend = &self.backends[idx];
@@ -307,5 +375,38 @@ addr = "127.0.0.1:2"
         assert!(scheduler
             .select_skipping(&[first_addr, second.backend().addr])
             .is_none());
+    }
+
+    #[test]
+    fn roundrobin_spills_over_when_backend_hits_max_conns() {
+        let config = crate::config::Config::from_toml(
+            r#"
+[server]
+bind = "127.0.0.1:0"
+[pool]
+max_conns_per_backend = 1
+[backends]
+algorithm = "roundrobin"
+[[backends.servers]]
+addr = "127.0.0.1:1"
+[[backends.servers]]
+addr = "127.0.0.1:2"
+"#,
+        )
+        .unwrap();
+        let metrics = Metrics::new().unwrap();
+        let scheduler = Scheduler::new(&config, metrics).unwrap();
+        let first = scheduler.select().unwrap();
+        assert!(first.backend().is_at_capacity());
+        // Even if roundrobin wraps back around to the first backend, it must
+        // prefer the backend that still has free capacity.
+        let second = scheduler.select().unwrap();
+        let second_addr = second.backend().addr;
+        assert_ne!(first.backend().addr, second_addr);
+        drop(second);
+        // Round-robin index now points back at backend 1 (which is still at
+        // capacity), so the next selection must spill over to backend 2.
+        let third = scheduler.select().unwrap();
+        assert_eq!(third.backend().addr, second_addr);
     }
 }
