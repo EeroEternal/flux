@@ -24,6 +24,8 @@ fin = "30s"
 
 [pool]
 max_idle_per_backend = 64
+# max_conns_per_backend = 0    # 0 = unlimited; positive caps concurrent in-flight connections per backend
+# acquire_timeout = "5s"       # max wait for a backend concurrency slot (defaults to timeouts.connect)
 idle_timeout = "60s"
 
 [backends]

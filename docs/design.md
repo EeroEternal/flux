@@ -93,8 +93,9 @@ TLS 终止与 l4/thin-l7 模式正交：l4 下仍做字节拼接，thin-l7 下�
 ## 5. 关键机制
 
 ### 5.1 连接池与复用
-- 获取连接时优先从 idle 取，并用非阻塞读探测存活（EOF 或有脏数据则丢弃）。
-- 流结束后把连接还回池（仅 thin-l7，且响应已完整消费、无残留字节）。
+- 获取连接时采用 **LIFO（后进先出）** 优先取出最近归还的热连接，并用非阻塞读探测存活（EOF 或有脏数据则丢弃），同时顺手清理池头已过期的旧连接。
+- 流结束后把连接还回池（仅 thin-l7，且响应已完整消费、无残留字节）；若池满则淘汰最旧的空闲连接以保留最新热连接。
+- 可选单后端并发上限 `pool.max_conns_per_backend`（默认 `0` 不限）：配置正整数时按后端维护信号量，等待槽位超时（`pool.acquire_timeout`，默认同 `timeouts.connect`）则计入 `xflux_rejected_total{reason="queue_full"}` 并在 `thin-l7` 下返回 `503 Service Unavailable`。
 - POST 与 GET 同等对待。
 
 ### 5.2 零缓冲转发
@@ -105,7 +106,7 @@ TLS 终止与 l4/thin-l7 模式正交：l4 下仍做字节拼接，thin-l7 下�
 `connect`（5s）、可选 `first_byte`（首包 TTFB 预算，未配时默认同 `idle`；`thin-l7` 下首包超时返回 `504 Gateway Timeout`）、`idle`（600s，流内静默）、`total`（3600s）、`fin`（30s）。
 
 ### 5.4 调度
-加权 leastconn：选择 `active/weight` 最小的健康后端，避免长流把新请求堆到忙节点。
+加权 leastconn（及 roundrobin）：优先选择未达到 `max_conns_per_backend` 容量上限的健康后端，在可用集合内按 `active/weight` 最小（或轮询）分配，避免长流把新请求堆到忙节点。
 
 ### 5.5 失败处理
 - 连接建立失败：可重试（默认 0 次，且会重新调度）。

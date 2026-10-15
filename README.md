@@ -20,7 +20,7 @@ timeouts and transparent forwarding.
 | L4 TCP splice (zero parsing) | ✅ default |
 | Thin-L7 (head parsing, body streaming) | ✅ request-level connection reuse |
 | Zero response/request buffering | ✅ bodies are copied in bounded chunks |
-| Backend connection pool for all methods | ✅ thin-l7; idle timeout decoupled from stream duration |
+| Backend connection pool for all methods | ✅ LIFO checkout; optional per-backend concurrency cap (`max_conns_per_backend`) |
 | Layered timeouts (connect / first_byte / idle / total / fin) | ✅ |
 | Least-connections scheduling (weighted) | ✅ plus round-robin |
 | Health checks on `/health` | ✅ hysteresis, never touches live streams |
@@ -127,6 +127,8 @@ fin = "30s"               # wait after a half-close in l4
 
 [pool]
 max_idle_per_backend = 64
+# max_conns_per_backend = 0   # optional per-backend in-flight cap (0 = unlimited)
+# acquire_timeout = "5s"      # max wait for a backend slot (defaults to timeouts.connect)
 idle_timeout = "60s"
 
 [backends]

@@ -110,8 +110,15 @@ the backend's first byte) or `idle` (afterwards). The splice is then cancelled.
 ## Scheduling and health
 
 - `Scheduler::select` reserves an in-flight slot through a `Lease` (RAII:
-  dropping it decrements `active`). This is why a panic in a connection task
-  cannot leak a slot.
+  dropping it decrements `active` and releases any per-backend concurrency
+  permit). This is why a panic in a connection task cannot leak a slot.
+- `ConnPool` checks out idle connections in **LIFO** order (`pop_back`) so the
+  most recently active socket is reused first, while opportunistically reaping
+  expired sockets from the front (`pop_front`).
+- When `pool.max_conns_per_backend > 0`, each `Backend` enforces a semaphore cap
+  acquired in `Lease::acquire` up to `pool.acquire_timeout` (defaulting to
+  `timeouts.connect`). Both `leastconn` and `roundrobin` prefer healthy backends
+  below `max_conns_per_backend` before falling back to full backends.
 - leastconn compares `active/weight` by cross-multiplying to avoid floats.
 - health probes hit `GET {path}` and only flip the `healthy` flag after
   `unhealthy_threshold` / `healthy_threshold` consecutive results. In-flight

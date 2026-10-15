@@ -285,7 +285,7 @@ pub(crate) async fn connect(state: &AppState) -> anyhow::Result<(Lease, TcpStrea
     let mut last_error: Option<io::Error> = None;
     let mut skip = Vec::new();
     for attempt in 0..=state.config.retry.max_retries {
-        let lease = match state.scheduler.select_skipping(&skip) {
+        let mut lease = match state.scheduler.select_skipping(&skip) {
             Some(lease) => lease,
             None => match state.scheduler.select() {
                 Some(lease) => lease,
@@ -296,7 +296,7 @@ pub(crate) async fn connect(state: &AppState) -> anyhow::Result<(Lease, TcpStrea
             },
         };
         let addr = lease.backend().addr;
-        match lease.backend().acquire().await {
+        match lease.acquire().await {
             Ok(conn) => return Ok((lease, conn)),
             Err(e) => {
                 if !skip.contains(&addr) {
@@ -309,6 +309,11 @@ pub(crate) async fn connect(state: &AppState) -> anyhow::Result<(Lease, TcpStrea
             }
         }
     }
+    let reason = match &last_error {
+        Some(e) if e.kind() == io::ErrorKind::WouldBlock => "queue_full",
+        _ => "unhealthy",
+    };
+    state.metrics.rejected(reason);
     Err(anyhow::anyhow!(
         "backend connect failed after retries: {}",
         last_error
