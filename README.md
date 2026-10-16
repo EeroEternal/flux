@@ -1,231 +1,60 @@
 # xLB
 
-**xLB** is a streaming-first load balancer for AI inference gateways. It sits
-in front of one or more gateway instances and
-forwards long-lived, non-idempotent streaming POSTs with as little added latency
-as possible.
+**xLB** is a streaming-first load balancer for AI gateways ([LiteLLM](https://github.com/BerriAI/litellm), [New API](https://github.com/Calcium-Ion/new-api), [AISIX](https://github.com/aisix-team/aisix)) and inference clusters. It occupies the HAProxy role in the AI stack: **it forwards bytes, not tokens**, keeping added TTFT near zero while pooling backend connections across long-lived streaming `POST`s.
 
-xLB occupies the HAProxy role: it forwards bytes, not tokens. Model selection,
-token accounting, prompt rewriting and protocol translation stay in the
-backends. xLB only does connection management, scheduling, health checking,
-timeouts and transparent forwarding.
+<p align="center">
+  <img src="docs/assets/architecture.svg" alt="xLB Architecture Topology" width="100%">
+</p>
 
-> Why *xLB*? A short, self-explanatory name for the streaming load balancer
-> (`LB`) in the X inference stack (`xLB` → `xRouter` / `xlite` → `Xinference`).
+## Why xLB (and why not just HAProxy?)
 
-## What is implemented
+xLB is directly inspired by **HAProxy's core philosophy**: a load balancer should be a rock-solid byte mover with strict separation of concerns, leaving application semantics to the backends.
 
-| Area | Status |
-|------|--------|
-| L4 TCP splice (zero parsing) | ✅ default |
-| Thin-L7 (head parsing, body streaming) | ✅ request-level connection reuse |
-| Zero response/request buffering | ✅ bodies are copied in bounded chunks |
-| Backend connection pool for all methods | ✅ LIFO checkout; stale-socket redial; optional per-backend concurrency cap (`max_conns_per_backend`) |
-| Layered timeouts (connect / first_byte / idle / total / fin) | ✅ |
-| Least-connections scheduling (weighted) | ✅ plus round-robin |
-| Health checks on `/health` + passive dial ejection | ✅ hysteresis, never touches live streams |
-| Retry only before response bytes | ✅ default 0 |
-| Prometheus metrics + TTFT delta | ✅ |
-| Graceful shutdown, `SO_REUSEPORT` | ✅ |
-| Auto L4 fallback for non-HTTP/1.1 traffic | ✅ thin-l7 sniffs HTTP/2, TLS, upgrades, binary |
-| Optional client-facing TLS termination | ✅ rustls, HTTP/1.1 ALPN |
+However, traditional load balancers and Ingress controllers were designed around short, idempotent web traffic, whereas AI inference traffic is almost entirely **long-lived, non-idempotent streaming `POST`s** (`POST /v1/chat/completions`). We built xLB in Rust to make AI streaming a first-class default rather than a fragile tuning exercise:
 
-## Modes and the connection-reuse tradeoff
+- **Aggressive `POST` connection pooling without payload inspection** — Traditional proxies (such as HAProxy's default `http-reuse safe`) avoid pooling backend connections across clients for non-idempotent `POST`s, while pure L4 proxies pin a client connection to one backend for its entire lifetime. xLB's `thin-l7` mode parses only HTTP/1.1 framing boundaries (`Content-Length` / chunked end) so every completed `POST` stream immediately returns its backend socket to a shared LIFO pool.
+- **Timeouts and retries shaped for LLM inference** — LLM workloads have distinct phases: *dial (`connect`) → prefill wait (`first_byte`) → reasoning pauses (`idle`) → multi-minute generation (`total`)*. xLB enforces this layered timeout hierarchy natively and guarantees retries happen **only before the first response byte** flows.
+- **Built-in TTFT attribution & zero-buffering** — General L7 proxies (Nginx, Envoy) often buffer bodies unless explicitly disabled per route. xLB streams in fixed 16 KiB chunks with zero aggregation and natively tracks `xlb_ttft_delta_ms` (the exact first-byte latency added by the proxy itself).
+- **Decoupled from gateway lifecycles** — Keeps TLS termination, connection pooling, and `/health` hysteresis out of the gateway process so LiteLLM, New API, or AISIX instances can scale or restart without dropping active streams.
 
-xLB has two forwarding modes:
+## Forwarding Modes
 
-- **`l4`** (default) — a pure TCP splice. No HTTP parsing overhead, so TTFT
-  noise is minimal. A client connection is mapped to one backend connection and
-  spliced with `copy_bidirectional`. Because a plain L4 proxy cannot tell where
-  an HTTP response ends, it cannot safely return a backend connection to the
-  pool, so L4 provides connection reuse only for the lifetime of a single client
-  connection.
-- **`thin-l7`** — parses only the request/response *heads* with `httparse`,
-  then streams bodies verbatim. Knowing where a response ends is what makes
-  request-level pooling correct: a completed response returns its backend
-  connection to the idle pool, and the next request on a client keep-alive
-  connection can be served by any backend. This is the mode that delivers the
-  "reuse backend connections for POST" constraint *across* client connections.
+- **`thin-l7` (recommended)** — Parses only HTTP/1.1 request and response heads (`httparse`), then streams bodies verbatim. Because xLB knows exactly where a response ends (`Content-Length` or chunked trailer), it returns backend connections to the idle pool immediately after each stream. If a connection starts with non-HTTP/1.1 bytes (HTTP/2, WebSocket/`Upgrade`, `CONNECT`, or binary), xLB transparently replays the buffered bytes and falls back to `l4`.
+- **`l4` (raw TCP splice)** — Pure bidirectional splice (`copy_bidirectional`) with zero protocol parsing and minimal CPU overhead. Best for raw gRPC/HTTP/2 passthrough when request-level connection pooling is not required.
 
-Both modes are zero-buffering: bytes are moved in 16 KiB chunks and written
-straight through; nothing is aggregated, transformed or decoded.
+Client-side HTTPS can be terminated directly on xLB in either mode via `[server.tls]` (rustls, PEM cert/key).
 
-### Automatic L4 fallback (thin-l7 only)
-
-thin-l7 only understands HTTP/1.1. If the first bytes of a connection look like
-something else, xLB stops parsing and transparently switches to the raw L4
-splice, forwarding the bytes it already buffered and then shuttling the rest:
-
-- first byte is not an uppercase HTTP method character (TLS records, binary);
-- the HTTP/2 connection preface (`PRI * HTTP/2.0`);
-- a request that fails to parse as HTTP/1.1;
-- `CONNECT` or any request carrying an `Upgrade` header (WebSocket, h2c).
-
-The fallback decision is logged and the stream continues byte-for-byte, so a
-client never notices. In l4 mode all of these are passed through natively.
-
-### TLS termination
-
-xLB can optionally terminate TLS for clients (`[server.tls]`). Client streams
-are then decrypted and handed to the normal forwarding path, so HTTPS clients
-reach plaintext gateways without a sidecar. Only HTTP/1.1 is advertised via
-ALPN. TLS is terminated in Rust with rustls (ring provider); the certificate and
-key are read from PEM files at startup.
-
-Note that TLS termination and `l4` mode are independent: enabling TLS only
-affects the client→xLB leg. With `mode = "l4"` xLB still splices the
-decrypted bytes to the backend; with `mode = "thin-l7"` it additionally gets
-request-level connection reuse.
-
-## Architecture
-
-```
-src/
-├── main.rs          CLI, tracing, shutdown signals
-├── config.rs        TOML model, duration parsing, validation
-├── server.rs        listener, accept loop, limits, TLS acceptor, metrics endpoint
-├── backend.rs       Backend, connection pool, weighted leastconn scheduler
-├── pool.rs          idle connection pool with liveness probing
-├── health.rs        active health probes + hysteresis
-├── metrics.rs       Prometheus registry
-└── proxy/
-    ├── mod.rs       dispatch + idle/deadline read/write helpers
-    ├── l4.rs        bidirectional splice with activity watchdog (also the fallback)
-    ├── l7.rs        HTTP/1.1 framing + protocol sniff + auto L4 fallback
-    └── http1.rs     head parsing, chunked scanner, body streaming
-```
-
-## Quick start
+## Quick Start
 
 ```bash
 cargo build --release
-./target/release/xlb --config config.toml
-# or validate only
-./target/release/xlb --check --config config.toml
+./target/release/xlb --check --config config.toml   # validate config
+./target/release/xlb --config config.toml           # start server
 ```
 
-Example `config.toml`:
+Minimal `config.toml` (see [`config.toml`](config.toml) for all timeout, pool, TLS, and health check options):
 
 ```toml
 [server]
 bind = "0.0.0.0:8006"
-mode = "thin-l7"          # l4 | thin-l7
-max_connections = 100000
-reuseport = false
-
-# [server.tls]              # optional client-facing TLS termination
-# enabled = true
-# cert = "/etc/xlb/tls/fullchain.pem"
-# key = "/etc/xlb/tls/privkey.pem"
-
-[timeouts]
-connect = "5s"            # backend connection establishment
-# first_byte = "60s"      # optional TTFB limit before first response byte (defaults to idle)
-idle = "600s"             # max silence per direction once streaming
-total = "3600s"           # hard ceiling for a whole stream
-fin = "30s"               # wait after a half-close in l4
-
-[pool]
-max_idle_per_backend = 64
-# max_conns_per_backend = 0   # optional per-backend in-flight cap (0 = unlimited)
-# acquire_timeout = "5s"      # max wait for a backend slot (defaults to timeouts.connect)
-idle_timeout = "60s"
+mode = "thin-l7"          # thin-l7 | l4
 
 [backends]
 algorithm = "leastconn"   # leastconn | roundrobin
-health_check_path = "/health"
-health_interval = "2s"    # "0s" disables active checking
-health_check_timeout = "2s"
-unhealthy_threshold = 2
-healthy_threshold = 2
-# passive_unhealthy_threshold = 0  # optional consecutive dial failures before immediate ejection
-# eject_cooldown = "5s"            # cooldown before passively ejected backend is re-admitted
-
-[[backends.servers]]
-addr = "10.56.88.32:8001"
-weight = 1
-
-[[backends.servers]]
-addr = "10.56.88.33:8002"
-weight = 1
-
-[retry]
-max_retries = 0           # only ever applies before any response byte
-
-[metrics]
-enabled = true
-bind = "0.0.0.0:9106"
+servers = [
+  { addr = "127.0.0.1:8001", weight = 1 },
+  { addr = "127.0.0.1:8002", weight = 1 },
+]
 ```
 
-## Metrics
+## Documentation
 
-Every metric is exposed on `GET /metrics`.
+- [Observability, Metrics & Verification](docs/observability.md) — Prometheus metrics (`:9106/metrics`), structured logging, and `curl` verification for TTFT & connection reuse
+- [Full Configuration Reference](config.toml) — annotated `config.toml` with defaults
+- [Architecture & Invariants](docs/architecture.md) — module layout, timeout hierarchy, and pooling rules
+- [Design Rationale](docs/design.md) — tradeoffs behind `thin-l7` vs `l4`
+- [Changelog](docs/changelog.md) — release history
 
-| Metric | Type | Meaning |
-|--------|------|---------|
-| `xlb_ttft_delta_ms` | histogram | Proxy-added first-byte latency (TTFB, not first token) |
-| `xlb_upstream_ttft_ms` | histogram | Request fully sent → backend first byte (TTFB) |
-| `xlb_client_ttft_ms` | histogram | Request fully sent → client first byte (TTFB) |
-| `xlb_stream_duration_seconds` | histogram | Whole stream duration |
-| `xlb_active_streams{backend}` | gauge | In-flight streams |
-| `xlb_conn_reuse_total{backend}` | counter | Connections taken from the idle pool |
-| `xlb_conn_new_total{backend}` | counter | Connections freshly dialed |
-| `xlb_conn_dial_errors_total{backend}` | counter | Failed dials |
-| `xlb_rejected_total{reason}` | counter | `unhealthy`, `queue_full`, `timeout`, `bad_request` |
-| `xlb_health_check_failures{backend}` | counter | Failed probes |
-| `xlb_health_check_success_total{backend}` | counter | Successful probes |
-| `xlb_backend_healthy{backend}` | gauge | 1 healthy / 0 unhealthy |
-| `xlb_upstream_errors_total{backend}` | counter | Upstream transfer failures |
-| `xlb_bytes_total{backend,direction}` | counter | Bytes proxied |
-| `xlb_connections_total` | counter | Client connections accepted |
-| `xlb_active_connections` | gauge | Open client connections |
+## License
 
-Logs are structured via `tracing`; set `XLB_LOG_JSON=1` for JSON and
-`RUST_LOG` for the filter.
-
-## Design rules enforced by the code
-
-1. **Never buffer a body.** No intermediate aggregation; `forward_body` copies
-   one bounded read at a time.
-2. **Reuse is only claimed when it is safe.** A backend connection is pooled
-   only after a self-delimiting response (Content-Length or a complete chunked
-   body) has been fully streamed and no leftover bytes remain.
-3. **Non-idempotent requests are never retried after bytes flow.** Retries apply
-   to connection establishment only.
-4. **Timeouts are layered** and per-direction for L4; the idle timeout covers
-   model thinking without killing long streams.
-5. **Health failures only affect new scheduling decisions.** Existing streams
-   continue to completion.
-
-## Tests
-
-```bash
-cargo test
-```
-
-Integration tests start real mock gateways and a real xLB server and cover
-pass-through, half-close, chunked streaming, backend connection reuse,
-pipelined requests, abrupt backend death, least-connections scheduling,
-automatic L4 fallback (HTTP/2 preface, binary protocols, upgrades) and TLS
-termination end-to-end (including backend reuse over HTTPS).
-
-## Minimal verification
-
-```bash
-# direct
-curl -o /dev/null -w 'direct ttft=%{time_starttransfer}s\n' \
-  -H 'Content-Type: application/json' \
-  -d '{"model":"mock","stream":true}' \
-  http://10.56.88.32:8001/v1/chat/completions
-
-# through xlb (thin-l7 so the pool is exercised)
-curl -o /dev/null -w 'xlb  ttft=%{time_starttransfer}s\n' \
-  -H 'Content-Type: application/json' \
-  -d '{"model":"mock","stream":true}' \
-  http://10.56.88.31:8006/v1/chat/completions
-```
-
-See [docs/design.md](docs/design.md) for the full design rationale,
-[docs/architecture.md](docs/architecture.md) for the code-level architecture,
-[docs/changelog.md](docs/changelog.md) for release notes, and [AGENTS.md](AGENTS.md)
-for the development conventions.
+Released under the [MIT License](LICENSE).
