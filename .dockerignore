@@ -1,0 +1,10 @@
+.git
+target
+docs
+.agents
+.github
+tests
+scripts
+*.md
+*.log
+**/.DS_Store
