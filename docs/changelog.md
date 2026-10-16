@@ -10,6 +10,26 @@ Write bullets that a human can ship from: **what changed**, **who it affects**,
 
 ## [Unreleased]
 
+### Added
+
+- **Prebuilt release binaries, `Dockerfile` & GHCR / Docker Hub publishing**:
+  added GitHub Actions release pipeline
+  ([`.github/workflows/release.yml`](../.github/workflows/release.yml))
+  publishing static tarballs + SHA-256 checksums for Linux (`x86_64` /
+  `aarch64` musl) and macOS (`aarch64` / `x86_64`) and multi-arch container
+  images (`ghcr.io/eeroeternal/xlb` and `eeroeternal/xlb`) on `v*.*.*` tags,
+  plus [`Dockerfile`](../Dockerfile), [`.dockerignore`](../.dockerignore), and
+  [`scripts/publish_image.sh`](../scripts/publish_image.sh). Breaking: No.
+
+### Changed
+
+- **Isolated gateway topology & Quick Start (`docs/assets/architecture.svg`, `README.md`)**:
+  updated the architecture diagram so `LiteLLM #1`, `LiteLLM #2`, and `New API`
+  each route to isolated upstream model providers without cross-connections, and
+  streamlined `README.md` Quick Start to use prebuilt release tarballs and
+  published `ghcr.io/eeroeternal/xlb:latest` / `eeroeternal/xlb:latest` images.
+  Breaking: No.
+
 ## [0.0.3] - 2026-10-16
 
 ### Added

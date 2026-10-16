@@ -26,11 +26,17 @@ Client-side HTTPS can be terminated directly on xLB in either mode via `[server.
 
 ## Quick Start
 
+**1. Install `xlb`**
+
 ```bash
-cargo build --release
-./target/release/xlb --check --config config.toml   # validate config
-./target/release/xlb --config config.toml           # start server
+# Option A: Download prebuilt binary (Linux x86_64; or use aarch64-unknown-linux-musl / aarch64-apple-darwin)
+curl -fsSL https://github.com/EeroEternal/xlb/releases/latest/download/xlb-x86_64-unknown-linux-musl.tar.gz | tar -xz
+
+# Option B: Run with Docker (GHCR or Docker Hub: eeroeternal/xlb:latest)
+docker run --rm -p 8006:8006 -p 9106:9106 -v "$PWD/config.toml:/etc/xlb/config.toml:ro" ghcr.io/eeroeternal/xlb:latest
 ```
+
+**2. Configure & run** (`./xlb --config config.toml`)
 
 Minimal `config.toml` (see [`config.toml`](config.toml) for all timeout, pool, TLS, and health check options):
 
