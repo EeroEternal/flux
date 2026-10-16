@@ -186,6 +186,7 @@ where
     if !client_buf.is_empty() {
         return read_with_idle(backend, buf, idle, deadline).await;
     }
+    let step_deadline = (Instant::now() + idle).min(deadline);
     let mut client_probe = [0u8; 1024];
     tokio::select! {
         biased;
@@ -198,7 +199,8 @@ where
                 )),
                 Ok(n) => {
                     client_buf.push(&client_probe[..n]);
-                    read_with_idle(backend, buf, idle, deadline).await
+                    let rem_idle = step_deadline.saturating_duration_since(Instant::now());
+                    read_with_idle(backend, buf, rem_idle, deadline).await
                 }
                 Err(e) => Err(io::Error::new(
                     io::ErrorKind::ConnectionAborted,
@@ -523,6 +525,9 @@ where
                 }
                 let take = n.min(remaining as usize);
                 write_all_with_idle(dst, &buf[..take], idle, deadline).await?;
+                if take < n {
+                    cb.push(&buf[take..n]);
+                }
                 remaining -= take as u64;
             }
             Ok(())
@@ -596,7 +601,12 @@ where
                 response_buf.consume(take);
                 remaining -= take as u64;
             }
-            let mut buf = vec![0u8; 16 * 1024];
+            let chunk_cap = if remaining > 64 * 1024 {
+                64 * 1024
+            } else {
+                16 * 1024
+            };
+            let mut buf = vec![0u8; chunk_cap];
             while remaining > 0 {
                 let n = read_backend_or_client_eof(
                     backend, &mut buf, client, client_buf, idle, deadline,
@@ -610,6 +620,9 @@ where
                 }
                 let take = n.min(remaining as usize);
                 write_all_with_idle(client, &buf[..take], idle, deadline).await?;
+                if take < n {
+                    response_buf.push(&buf[take..n]);
+                }
                 remaining -= take as u64;
             }
             Ok(())

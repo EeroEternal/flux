@@ -1511,7 +1511,7 @@ async fn thin_l7_propagates_client_abort_during_silent_prefill_and_stream_pause(
             })
         })
     };
-    let backend = spawn_backend(handler, conns).await;
+    let backend = spawn_backend(handler, conns.clone()).await;
     let server = start_xlb("thin-l7", &[backend]).await;
 
     // 1. Client aborts during silent prefill (before first response byte).
@@ -1549,6 +1549,7 @@ async fn thin_l7_propagates_client_abort_during_silent_prefill_and_stream_pause(
         .expect("backend socket must close immediately when client aborts mid-stream")
         .unwrap();
     assert_eq!(which2, 1);
+    assert_eq!(conns.load(Ordering::SeqCst), 2);
 
     server.stop().await;
 }
