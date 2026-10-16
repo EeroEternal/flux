@@ -1,115 +1,147 @@
-# Engineering hard rules
+# Engineering Hard Rules
 
 This file adapts the console-kit engineering rules to xFlux. Rules whose original
-motivation was database/UI specific are dropped; the universal ones are kept and
-extended with xFlux's streaming constraints.
+motivation was database/UI specific are omitted; universal rules are preserved
+and extended with xFlux's streaming invariants.
 
-## 一、禁止夹带变更（Silent Drift）
+## 1. No Piggybacking (Silent Drift)
 
-单个 commit / PR 不得夹带与声明目标无关的修改：
+A single commit or PR must not carry changes unrelated to its stated objective:
 
-1. **调参私货**：以 `refactor` / `format` 名义修改默认超时、池大小、阈值、
-   并发上限、调度权重等生产参数。
-2. **批量重格式化**：`cargo fmt` 的结果必须单独 commit，不得与逻辑改动混合。
-3. **`#[allow(...)]` 压制**：不得用 `#[allow(clippy::xxx)]` 让警告消失而不写
-   原因。确需豁免时，`// reason:` 必须同行。
-4. **跨模块 refactor**：修 A 模块 bug 时不得顺手重命名 B 模块。
+1. **Unannounced parameter tuning**: modifying default timeouts, pool sizes,
+   thresholds, concurrency caps, or scheduling weights under the guise of
+   `refactor` or `format`.
+2. **Bulk reformatting**: `cargo fmt` sweeps must be committed separately and
+   never mixed with behavioral changes.
+3. **Undocumented `#[allow(...)]` suppressions**: never silence a warning with
+   `#[allow(clippy::xxx)]` without an inline `// reason:` comment on the same line.
+4. **Cross-module opportunistic refactoring**: do not rename or restructure
+   module B while fixing a bug in module A.
 
-违规一律 `git reset --mixed HEAD~1` 重新拆分。
-
----
-
-## 二、`git stash` 使用规则
-
-1. **命名诚实**：`git stash push -m "..."` 不得用含糊描述掩盖逻辑改动。
-2. **stash 前** `git diff --stat`，确认 feature 依赖不被抽走。
-3. **stash 后必须** `cargo check --tests`（不可跳过）。
-4. **不得 stash** `Cargo.toml` / `Cargo.lock` / 构建脚本。
+Violations must be split via `git reset --mixed HEAD~1`.
 
 ---
 
-## 三、后台任务 / `tokio::spawn` 规范
+## 2. Safe `git stash` Discipline
 
-`tokio::spawn` 是高风险构造：
-
-1. **生命周期显式化**：不得在 `new()` / `Default::default()` 里裸写
-   `tokio::spawn`。必须提供显式 `start_background_xxx()` 入口，由 `main()`
-   调用。
-2. **Runtime 守卫**：spawn 代码用 `tokio::runtime::Handle::try_current()` 包装，
-   或只在已知 runtime 上下文触发。
-3. **超时保护**：长跑任务里的每次异步调用必须有 `tokio::time::timeout(...)`
-   兜底，避免 daemon 永久挂死。
-4. **错误不得吞掉**：panic / timeout 必须 `tracing::error!` 至少记录一条。
-5. **可观测**：daemon 写共享状态必须有 metric / debug endpoint 能观察到，
-   否则无法判断存活。
+1. **Honest naming**: `git stash push -m "..."` must accurately describe what is
+   being stashed.
+2. **Before stashing**: run `git diff --stat` and confirm no current-feature
+   dependency is removed.
+3. **After stashing or popping**: running `cargo check --tests` is mandatory.
+4. **Never stash** `Cargo.toml`, `Cargo.lock`, or build scripts.
 
 ---
 
-## 四、避免幻觉代码（Ghost Code）
+## 3. Background Tasks and `tokio::spawn` Discipline
 
-1. **有定义无调用**：函数 / 类型全仓库 `rg` 找不到 caller。
-2. **有路径无写入**：新增字段有 load 点无 store 点。
-3. **有埋点无分类**：metric 只埋上升不埋下降（或反之）。关键路径正反两向都要埋。
-4. **有 TODO 无 issue**：`// TODO:` 必须关联 issue。
+`tokio::spawn` is a high-risk construct:
 
-发现即一次性补齐 caller / store / 下游埋点，不接受"下一轮再做"。
-
----
-
-## 五、脚本化批量修改规范
-
-1. **regex 替换后必须 grep 验证**（脚本静默失败不报错）。
-2. **多行 regex 特别危险**：优先用 `StrReplace`/编辑工具而非自写脚本。
-3. **内嵌字符串逃逸**：脚本改完必须人肉 review 生成的代码段。
-
----
-
-## 六、命令管道的退出码陷阱
-
-管道退出码默认取末位命令：`失败命令 | tail -3` 的退出码是 tail 的 0。
-
-- 判断上游成败用 `set -o pipefail`、临时文件承接输出，或先跑再读输出。
-- 交互式判断"完成了吗"直接查权威源，不信代理进程退出码。
-- `bash -n` 只验语法；必须实跑并制造一次上游失败确认链路中断。
+1. **Explicit lifecycle**: never call `tokio::spawn` inside `new()` or
+   `Default::default()`. Provide an explicit `start_xxx()` / `spawn()` entry
+   point invoked from `main()` or server startup.
+2. **Runtime guard**: ensure spawned tasks run only within a known Tokio runtime
+   context or guard with `tokio::runtime::Handle::try_current()`.
+3. **Timeout protection**: every async network/IO call inside a long-running
+   background loop must be bounded by `tokio::time::timeout(...)` so a daemon
+   can never hang indefinitely.
+4. **Never swallow errors**: panics or unexpected task exits must log at least
+   one `tracing::error!` / `tracing::warn!` event.
+5. **Observability**: shared state mutated by background tasks must be observable
+   through Prometheus metrics or health state.
 
 ---
 
-## 七、流式内核不变量（xFlux 专属，最高优先级）
+## 4. Zero Hallucination Code (Ghost Code)
 
-以下四条是 xFlux 的正确性底线，任何改动都必须保持：
+1. **Defined but never called**: functions or types with zero callers across the
+   repository (`rg` finds no usage).
+2. **Read without write**: state fields that are read/loaded but never updated.
+3. **One-sided metrics**: counters/gauges that track increments without
+   corresponding decrements or failure paths. Critical paths must instrument both
+   success and failure outcomes.
+4. **Unlinked `TODO`**: any `// TODO:` comment must reference a tracking issue.
 
-1. **零缓冲**：`forward_body` 每次只持有一个有界 read；L4 用
-   `copy_bidirectional`。不得引入任何聚合/解码中间层。
-2. **只在可证明的边界复用连接**：只有响应自定界（Content-Length 或完整
-   chunked）且无残留字节时，才可 `release_conn`。
-3. **首字节后不重试**：一旦有响应字节流向客户端，任何失败只关两端、不重放。
-4. **超时分层**：`connect / idle / total / fin` 各司其职；L4 的 idle 由活动
-   看门狗实现，L7 由每次读写超时实现。
-
-修改 `src/proxy/` 必须同时在 `tests/integration.rs` 增加或更新对应行为测试。
-
----
-
-## 八、违规处理
-
-1. **报告与代码不符**：`git reset --hard` 回退到上一个诚实状态，重写提交。
-2. **编译失败还报完成**：暂停工作，提交复盘。
-3. **重复同类错误 3 次以上**：后续 commit 必须 pair review。
-4. **夹带生产参数私货**：立即 revert，重新按单独 commit 提交。
+Any ghost code discovered must be wired up or removed immediately in the same
+change.
 
 ---
 
-## 九、负载均衡边界（HAProxy 位，禁止滑向网关）
+## 5. Scripted Bulk Edits
 
-xFlux 的产品位是长流前面的 HAProxy，不是推理网关。审查热路径时用这一条判越界：
+1. **Always verify regex replacements with `rg`** (scripts can silently match
+   nothing and exit 0).
+2. **Avoid fragile multiline regexes**: prefer structured edit tools over ad-hoc
+   multiline `sed` / Python regex scripts.
+3. **Inspect escaping**: manually review diffs after any scripted transformation.
 
-> **只碰为了「选谁、能否还池、何时断开」所必需的帧；永远不碰 payload 语义。**
+---
 
-| 允许（帧） | 禁止（语义） |
+## 6. Pipeline Exit Code Traps
+
+In shell pipelines, the default exit code is that of the **last** command:
+`failing_cmd | tail -3` exits `0`.
+
+- Always enable `set -o pipefail` in scripts, capture output to a file, or run
+  the command directly without piping when checking pass/fail status.
+- When verifying GitHub Actions or PR status, inspect authoritative fields
+  (`gh run view` / `gh pr checks` `conclusion`) rather than wrapper exit codes.
+- `bash -n` checks syntax only; always execute scripts to verify behavior.
+
+---
+
+## 7. Streaming Core Invariants (xFlux Specific, Highest Priority)
+
+Every change in xFlux must preserve these four invariants:
+
+1. **Zero body buffering**: `forward_body` holds at most one bounded read chunk
+   at a time; L4 uses `copy_bidirectional`. Never introduce an intermediate
+   body-aggregating or decoding layer.
+2. **Pool reuse only at proven message boundaries**: a backend connection may be
+   returned to the pool (`release_conn`) only when the response is
+   self-delimiting (`Content-Length` or complete `chunked` terminator) and the
+   read buffer has no leftover bytes.
+3. **No retry after first response byte**: once any response byte has been
+   written to the client, any subsequent error must close both sides without
+   replaying the request.
+4. **Layered timeouts**: `connect`, `first_byte`, `idle`, `total`, and `fin`
+   remain distinct; L4 enforces `first_byte`/`idle` via the activity watchdog,
+   and Thin-L7 enforces them via per-read/write timeouts.
+
+Any modification under `src/proxy/` must add or update corresponding behavioral
+tests in `tests/integration.rs`.
+
+---
+
+## 8. Violation Handling
+
+1. **Report contradicts code**: `git reset --hard` to the last verified state
+   and rewrite the change cleanly.
+2. **Claiming completion while the build or tests fail**: stop immediately and
+   fix the failure before reporting.
+3. **Repeated identical mistakes (3+ times)**: require independent critic review
+   before every subsequent commit.
+4. **Piggybacked production parameter changes**: revert immediately and submit
+   as a dedicated, documented commit.
+
+---
+
+## 9. Load Balancer Boundary (HAProxy Position, Never Drift into Gateway Logic)
+
+xFlux is an L4/Thin-L7 load balancer in front of long-lived streams, not an AI
+inference gateway. Apply this rule when reviewing hot paths:
+
+> **Touch only the framing required to decide which backend to pick, whether a
+> connection can be returned to the pool, and when to close; never inspect
+> payload semantics.**
+
+| Permitted (Framing) | Prohibited (Payload Semantics) |
 | --- | --- |
-| TCP splice；HTTP 头；Content-Length / chunked 边界 | SSE `data:` / `[DONE]` / NDJSON 行扫描 |
-| 协议嗅探与自动回退 L4 | 从 body 抽 `model`、prompt hash、KV 前缀 |
-| leastconn / RR、健康、请求头、带外 agent 负载 | 用 token 速率做调度 |
-| 连接建立失败时 redispatch | 出响应字节后重试或重放 |
+| TCP splice; HTTP headers; `Content-Length` / `chunked` framing | Scanning SSE `data:` / `[DONE]` / NDJSON lines |
+| Protocol sniffing and automatic L4 fallback | Extracting `model`, prompt hashes, or KV prefixes from the body |
+| `leastconn` / `roundrobin`, health, request headers, out-of-band load | Scheduling by token generation rate |
+| Redispatching on connection dial failure | Retrying or replaying after any response byte has flowed |
 
-还池条件是 HTTP 自描述帧结束，不是模型说生成完了。热路径上新增对 body / SSE / JSON 的解析即越界，评审直接拒。
+Pool return is governed by HTTP self-delimiting framing completion, never by a
+model emitting `[DONE]`. Any hot-path parsing of body/SSE/JSON payloads is out
+of bounds and must be rejected in review.

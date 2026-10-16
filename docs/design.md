@@ -1,47 +1,49 @@
-# xFlux: AI 流式负载均衡设计文档
+# xFlux: AI Streaming Load Balancer Design Document
 
-> 名称：**xFlux**（备选 Conduit / Artery / Photon）。短、好记，直接对应
-> 「连续流动的流式数据」。AI 网关最核心的不是请求/响应，而是一条长命的、
-> 边生成边吐的流。
+> Name: **xFlux** (alternatives considered: Conduit / Artery / Photon). Short,
+> memorable, and directly evokes a continuous flow of streaming data. At the
+> heart of an AI gateway is not a short request/response transaction, but a
+> long-lived stream emitted chunk by chunk.
 
-## 1. 概述
+## 1. Overview
 
-xFlux 是一个面向 AI 推理网关的极简、流式优先负载均衡器。它的唯一职责是以
-最小延迟、正确语义地把长命、非幂等的流式 POST 请求转发到后端网关实例。
+xFlux is a minimal, streaming-first load balancer built for AI inference
+gateways. Its sole responsibility is to forward long-lived, non-idempotent
+streaming POST requests to backend gateway instances with minimal latency and
+exact framing semantics.
 
-它不是通用 L7 代理，也不是模型路由/计费网关。模型选择、token 计量、prompt
-改写、协议转换全部留在后端。xFlux 只做连接管理、
-调度、健康检查和透明转发。
+It is neither a general-purpose L7 proxy nor a model-routing/billing gateway.
+Model selection, token accounting, prompt rewriting, and protocol conversion
+stay in the backend gateways. xFlux focuses exclusively on connection
+management, scheduling, health checking, and transparent byte forwarding.
 
-## 2. 目标与非目标
+## 2. Goals and Non-Goals
 
-### 目标
-- 首字节增量接近 0（直连 vs 经 xFlux 的 TTFB 差值在几毫秒内）
-- 对 POST 也复用后端连接
-- 不缓冲请求体和响应体
-- 超时覆盖最长流（默认 ≥ 600s）
-- 不对非幂等请求自动重试
-- 按在途连接数调度
-- 可观测：每跳的首字节增量、连接复用率、流生命周期
+### Goals
+- Near-zero first-byte overhead (direct vs. via-xFlux TTFB delta within a few milliseconds)
+- Backend connection reuse across all HTTP methods, including `POST`
+- Zero buffering of request or response bodies
+- Timeouts tailored for long-running streams (default `idle >= 600s`)
+- Never automatically retry a non-idempotent request once response bytes have flowed
+- Schedule by in-flight connection load (`leastconn`)
+- First-class observability: per-hop TTFB delta, connection reuse rate, and stream lifecycle
 
-### 非目标
-- 不做模型感知路由；不做计费、鉴权、内容改写；不做请求体聚合或响应体重组
-- 不解析 SSE / NDJSON / JSON payload；不把 `[DONE]` 或 token 当作转发/还池/调度条件
-- 不支持自动重试生成类请求；不追求成为功能齐全的 API 网关
-- xFlux 占据 HAProxy 位：转发字节，不转发 token
+### Non-Goals
+- No model-aware routing; no billing, authentication, or content rewriting; no request body aggregation or response body reassembly
+- Never parse SSE / NDJSON / JSON payloads; never treat `[DONE]` or token boundaries as forwarding, pooling, or scheduling conditions
+- No automatic replay of generative requests; not a full-featured API gateway
+- xFlux occupies the HAProxy position: it forwards bytes, not tokens
 
-## 3. 核心约束
+## 3. Core Constraints
 
-1. **零响应体缓冲**：收到后端字节立即写给客户端，反之亦然。
-2. **全方法连接复用**：包括 POST。连接池按后端地址维护，空闲超时与流占用解耦。
-3. **超时分层**：连接建立短（5s）、流静默长（600s）、整体流更长（3600s）、
-   半关闭（FIN）单独处理。
-4. **失败语义**：仅在连接尚未建立或明确传输层错误时允许重试（默认 0 次）。
-   一旦开始收到响应体，任何失败直接透传，绝不重放。
-5. **调度**：默认 leastconn。
-6. **健康检查**：只打轻量端点（`GET /health`），不影响在途流。
+1. **Zero body buffering**: bytes read from a backend are written immediately to the client, and vice versa.
+2. **All-method connection reuse**: including `POST`. Connection pools are maintained per backend address with idle timeouts decoupled from stream duration.
+3. **Layered timeouts**: short connection establishment (`5s`), optional pre-response `first_byte` budget, long in-stream silence (`600s`), longer total stream ceiling (`3600s`), and independent half-close (`fin`, `30s`).
+4. **Failure semantics**: retries apply only to connection establishment before any response byte flows (default `0`). Once response bytes begin flowing, failures close both ends immediately without replay.
+5. **Scheduling**: weighted `leastconn` by default.
+6. **Health checking**: probes a lightweight endpoint (`GET /health`) out-of-band without disturbing in-flight streams.
 
-## 4. 架构
+## 4. Architecture
 
 ```
 ┌─────────────┐     ┌──────────────────┐     ┌─────────────────┐
@@ -57,102 +59,88 @@ xFlux 是一个面向 AI 推理网关的极简、流式优先负载均衡器。�
                     └─────────────┘
 ```
 
-### 4.1 模式选择
+### 4.1 Forwarding Modes
 
-- **默认 L4**：纯 TCP 透传，零 HTTP 解析开销，最不容易引入首字节噪声。
-  代价是失去基于 header 的路由，也无法安全地跨客户端连接复用后端连接。
-- **可选 thin L7**：只解析请求行 + 必要 header，然后立即切到流式透传。
-  因为知道响应在哪里结束，所以可以安全地把后端连接放回连接池，实现
-  请求级复用。
+- **Default L4 (`mode = "l4"`)**: pure TCP splice with zero HTTP parsing overhead and minimal first-byte noise. Tradeoff: no header-level inspection and no cross-client backend connection reuse.
+- **Optional Thin-L7 (`mode = "thin-l7"`)**: parses only the HTTP/1.1 request/response heads and streams bodies verbatim. Because message boundaries (`Content-Length` or `chunked`) are known, completed responses safely return the backend connection to the idle pool for request-level reuse.
 
-### 4.1.1 协议嗅探与自动回退
+### 4.1.1 Protocol Sniffing and Automatic L4 Fallback
 
-thin-l7 只认 HTTP/1.1。当首字节不是大写 HTTP 方法字符（TLS 记录、二进制
-协议）、看到 HTTP/2 preface（`PRI * HTTP/2.0`）、请求无法按 HTTP/1.1 解析、
-或出现 `CONNECT` / `Upgrade`（WebSocket、h2c）时，xFlux 立即停止解析，把
-已缓冲的字节连同后续字节一起交给 L4 splice 原样透传。客户端无感知。
+`thin-l7` speaks HTTP/1.1. When the first byte is not an uppercase ASCII method character (e.g., TLS record or binary protocol), when an HTTP/2 connection preface (`PRI * HTTP/2.0`) is detected, when headers cannot be parsed as HTTP/1.1, or when `CONNECT` / `Upgrade` (WebSocket, h2c) is requested, xFlux immediately stops parsing and hands the buffered bytes plus the live sockets to the raw L4 splice. The client observes no protocol interruption.
 
-### 4.1.2 TLS 终止（可选）
+### 4.1.2 Client-Side TLS Termination (Optional)
 
-`[server.tls]` 打开后，xFlux 用 rustls 在客户端侧终止 TLS，再把明文交给
-正常转发路径，从而让 HTTPS 客户端直达明文网关。ALPN 只宣告 HTTP/1.1。
-TLS 终止与 l4/thin-l7 模式正交：l4 下仍做字节拼接，thin-l7 下额外获得
-请求级连接复用。
+When `[server.tls]` is enabled, xFlux terminates client TLS via `rustls` and passes the plaintext stream into the configured forwarding mode (`l4` or `thin-l7`), allowing HTTPS clients to reach plaintext backend gateways. ALPN advertises `http/1.1`. TLS termination is orthogonal to the forwarding mode: `l4` performs raw byte splicing, while `thin-l7` additionally provides request-level backend connection pooling.
 
-### 4.2 关键组件
+### 4.2 Key Components
 
-| 组件 | 职责 | 关键点 |
-|------|------|--------|
-| Listener | 接受客户端连接 | TCP_NODELAY、backlog、SO_REUSEPORT |
-| Scheduler | 选择后端 | 加权 leastconn + 健康状态；可选 roundrobin |
-| ConnPool | 后端连接复用 | 按后端地址分池；空闲超时与流占用解耦 |
-| Proxy | 双向字节搬运 | 零缓冲、半关闭、超时分层 |
-| Health | 探活 | 独立任务，只打 /health；失败只影响新调度 |
-| Metrics | 可观测 | TTFT 增量、连接复用率、流时长、拒绝原因 |
+| Component | Responsibility | Key Details |
+|-----------|----------------|-------------|
+| Listener | Accept client sockets | `TCP_NODELAY`, backlog, `SO_REUSEPORT` |
+| Scheduler | Pick backend | Weighted `leastconn` + health + capacity awareness; optional `roundrobin` |
+| ConnPool | Reuse backend sockets | Per-backend LIFO idle pool; idle timeout decoupled from active stream duration |
+| Proxy | Bidirectional byte transfer | Zero buffering, half-close handling, layered timeouts |
+| Health | Liveness probing | Out-of-band `/health` task + optional passive dial-failure circuit breaking |
+| Metrics | Observability | TTFB delta, connection reuse rate, stream duration, rejection reasons |
 
-## 5. 关键机制
+## 5. Key Mechanisms
 
-### 5.1 连接池与复用
-- 获取连接时采用 **LIFO（后进先出）** 优先取出最近归还的热连接，并用非阻塞读探测存活（EOF 或有脏数据则丢弃），同时顺手清理池头已过期的旧连接。
-- **复用竞态防半死重拨（`thin-l7`）**：当从空闲池取出的连接（`reused = true`）在写入请求头时失败，或对无请求体/已完整读入初始缓冲区的定长请求在收到任何响应字节前即遭遇对端 keep-alive 关断（0 字节 EOF / RST），xFlux 会透明重拨一条新连接完成转发，消除 HTTP/1.1 keep-alive 超时竞态导致的偶发 502/EOF。
-- 流结束后把连接还回池（仅 thin-l7，且响应已完整消费、无残留字节）；若池满则淘汰最旧的空闲连接以保留最新热连接。
-- 可选单后端并发上限 `pool.max_conns_per_backend`（默认 `0` 不限）：配置正整数时按后端维护信号量，等待槽位超时（`pool.acquire_timeout`，默认同 `timeouts.connect`）则计入 `xflux_rejected_total{reason="queue_full"}` 并在 `thin-l7` 下返回 `503 Service Unavailable`。
-- POST 与 GET 同等对待。
+### 5.1 Connection Pool and Reuse
+- Connections are checked out in **LIFO (last-in, first-out)** order so the warmest recently returned socket is reused first, validated with a non-blocking read probe (discarding sockets with EOF or unexpected leftover bytes) while reaping expired connections from the front of the queue.
+- **Stale pooled socket redial (`thin-l7`)**: when a pooled connection (`reused = true`) fails while writing the request head, or when a bodiless/inline-body request encounters a peer keep-alive close race (0-byte EOF or RST before any response byte), xFlux transparently dials a fresh connection once to complete the request, eliminating spurious 502/EOF errors from HTTP/1.1 keep-alive races.
+- After a stream finishes at a proven HTTP message boundary with no leftover bytes (`thin-l7` only), the backend socket is returned to the pool; if the pool is at `max_idle_per_backend`, the oldest idle socket at the front is evicted.
+- Optional per-backend concurrency cap `pool.max_conns_per_backend` (default `0` = unlimited): bounds concurrent in-flight streams per backend via an RAII semaphore permit. When waiting for a slot exceeds `pool.acquire_timeout` (defaults to `timeouts.connect`), xFlux increments `xflux_rejected_total{reason="queue_full"}` and returns `503 Service Unavailable` in `thin-l7`.
+- `POST` and `GET` are treated identically for connection reuse.
 
-### 5.2 零缓冲转发
-- L4：`tokio::io::copy_bidirectional`，配合活动看门狗实现每方向 idle 超时。
-- L7：解析 head 后，body 用 16 KiB 缓冲逐块透传，绝不聚合。
+### 5.2 Zero-Buffer Forwarding
+- **L4**: `tokio::io::copy_bidirectional` paired with an activity watchdog enforcing `first_byte` and per-direction `idle` timeouts.
+- **Thin-L7**: after parsing the HTTP head, the body is forwarded chunk-by-chunk through a bounded 16 KiB read buffer without aggregation.
 
-### 5.3 超时模型
-`connect`（5s）、可选 `first_byte`（首包 TTFB 预算，未配时默认同 `idle`；`thin-l7` 下首包超时返回 `504 Gateway Timeout`）、`idle`（600s，流内静默）、`total`（3600s）、`fin`（30s）。
+### 5.3 Timeout Model
+`connect` (`5s`), optional `first_byte` (pre-response TTFB budget, defaulting to `idle` when omitted; returns `504 Gateway Timeout` in `thin-l7` if exceeded before any response byte is written to the client), `idle` (`600s` in-stream silence), `total` (`3600s`), and `fin` (`30s`).
 
-### 5.4 调度
-加权 leastconn（及 roundrobin）：优先选择未达到 `max_conns_per_backend` 容量上限的健康后端，在可用集合内按 `active/weight` 最小（或轮询）分配，避免长流把新请求堆到忙节点。
+### 5.4 Scheduling
+Weighted `leastconn` (and `roundrobin`): prefers healthy backends that have not reached `max_conns_per_backend`, picking the backend with the lowest `active / weight` ratio (or next round-robin index) so long-running streams do not pile new requests onto busy nodes.
 
-### 5.5 失败处理
-- 连接建立失败：可重试（默认 0 次，且会重新调度），同时立即清空该后端的空闲连接池。
-- 被动健康熔断（可选 `backends.passive_unhealthy_threshold`）：连续建连失败达到阈值时无需等待下一轮主动 `/health` 探测即可立即摘除死节点，防止 leastconn 在探测间隔内把新流量持续打向 `active = 0` 的死节点；经过 `backends.eject_cooldown`（默认 `5s`）或主动探活恢复后自动重新纳入调度。
-- 已开始传输后失败：直接关闭两端，记录指标，不重放。
-- 健康检查失败：标记 unhealthy 并清空该后端空闲连接池，已有流继续，新请求不再调度过去。
+### 5.5 Failure Handling
+- **Connection establishment failure**: retryable up to `retry.max_retries` (default `0`), redispatching across healthy backends and immediately clearing the failed backend's idle pool.
+- **Passive dial-failure circuit breaking** (optional `backends.passive_unhealthy_threshold`): marks a backend unhealthy immediately after N consecutive TCP dial failures without waiting for the next active `/health` tick, preventing `leastconn` from routing traffic to a dead `active = 0` backend between probes. Re-admits the backend after `backends.eject_cooldown` (default `5s`) unless active health checks have marked it unhealthy.
+- **Mid-stream failure**: closes both client and backend sockets immediately, records metrics, and never replays the request.
+- **Active health check failure**: marks the backend unhealthy and clears its idle pool; in-flight streams continue undisturbed while new requests are routed elsewhere.
 
-## 6. 技术选型
+## 6. Technology Stack
 
-| 层级 | 选择 |
-|------|------|
-| 运行时 | tokio |
-| L4 | tokio::net |
-| L7 | httparse 只解析 head + 手动 body 流式 |
-| 配置 | serde + toml |
-| 指标 | prometheus crate |
-| 日志 | tracing |
+| Layer | Choice |
+|-------|--------|
+| Runtime | `tokio` |
+| L4 | `tokio::net` |
+| L7 | `httparse` (head-only) + manual streaming body framer |
+| Config | `serde` + `toml` |
+| Metrics | `prometheus` crate |
+| Logging | `tracing` |
 
-不引入完整 HTTP 框架（axum/actix），避免默认缓冲和中间件开销。
+Full HTTP frameworks (`axum` / `actix`) are intentionally avoided to eliminate implicit body buffering and middleware overhead.
 
-## 7. 可观测性
+## 7. Observability
 
-见 README 的指标表。核心是 `xflux_ttft_delta_ms`（代理引入的首字节增量）、
-`xflux_conn_reuse_total` / `xflux_conn_new_total`（连接复用率）和
-`xflux_stream_duration_seconds`（流生命周期）。
+See the metrics table in `README.md`. Key signals are `xflux_ttft_delta_ms` (proxy-added first-byte latency), `xflux_conn_reuse_total` / `xflux_conn_new_total` (backend connection reuse rate), and `xflux_stream_duration_seconds` (stream lifetime distribution).
 
-## 8. 部署与验证
+## 8. Deployment and Verification
 
-- 单二进制，配置驱动；建议与网关同机房、低 RTT。
-- 验收：直连 vs 经 xFlux 的 `ttft` 差值 < 10ms；整段时长/QPS/chunk 间隔一致；
-  受控 A/B 分别验证连接复用、超时、调度算法的贡献。
+- Single static-friendly binary, configuration-driven; deploy in the same region/LAN as backend gateways for sub-millisecond RTT.
+- Acceptance criteria: direct vs. via-xFlux TTFB delta < 10 ms; identical total stream duration, QPS, and inter-chunk cadence; controlled A/B verification of connection pooling, layered timeouts, and scheduling.
 
-## 9. 实现阶段
+## 9. Implementation Milestones
 
-1. MVP（L4）：TCP 双向 copy + leastconn + 连接池 + 基础超时 + /health —— 已完成
-2. 可观测：TTFT 增量、连接复用率、流生命周期 —— 已完成
-3. thin L7：head 解析 + 请求级连接复用 —— 已完成
-4. 协议嗅探 + 自动回退 L4 —— 已完成
-5. 客户端侧 TLS 终止（rustls）—— 已完成
-6. 扩展调度：带外 agent 负载（队列深度 / inflight），不扫 payload —— 待定
+1. **MVP (L4)**: bidirectional TCP splice + `leastconn` + connection pool + layered timeouts + `/health` — Completed
+2. **Observability**: TTFB delta histograms, connection reuse counters, stream lifecycle metrics — Completed
+3. **Thin-L7**: HTTP/1.1 head parsing + request-level connection reuse — Completed
+4. **Protocol sniffing + automatic L4 fallback** — Completed
+5. **Client-side TLS termination (`rustls`)** — Completed
+6. **Extended resilience**: phased `first_byte` timeout, LIFO bounded pool, passive dial ejection, and stale-socket redial — Completed
+7. **Extended scheduling**: out-of-band agent load signals (queue depth / in-flight), without payload inspection — Planned
 
-## 10. 风险与边界
+## 10. Risks and Boundaries
 
-- 自定义代理的连接管理、半关闭、超时边界容易出 bug，因此有完善的集成测试
-  （长流、半关闭、后端突然断开、健康检查抖动）。
-- 只做透明转发 + 基础健康时，配好的 HAProxy/nginx 成本更低；xFlux 的价值在于
-  默认路径就是流式友好的，且指标能精确反映 TTFT 增量。
-- 不要在 xFlux 里做模型路由或计费，否则会重新引入网关已经解决的问题。
+- Custom proxy connection management, half-close handling, and timeout boundaries require rigorous testing; `tests/integration.rs` covers long streams, half-close, abrupt backend disconnects, fallback protocols, and health transitions.
+- Do not add model routing, prompt inspection, or token billing inside xFlux; those belong in the backend AI gateways.

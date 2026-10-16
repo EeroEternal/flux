@@ -1,73 +1,80 @@
 ---
 name: release
-description: 发版（打 tag）完整 promoter 流程：本地门禁全量重跑、发版三查（版本号/changelog/文档生命周期）、人工批准硬停、tag 与验证。Use before cutting any vX.Y.Z tag or production deploy.
+description: Full release promoter workflow for cutting a vX.Y.Z tag: run full local gates, verify version/changelog/docs, stop for explicit human approval, then tag and verify. Use before cutting any vX.Y.Z tag or production deploy.
 ---
 
-# Release Promoter Process（发版与打 Tag 流程规范）
+# Release Promoter Process
 
-## 适用场景
+## When to Use
 
-在执行任何 `git tag v*.*.*`、合并 release 分支或触发生产部署之前，必须遵守本规范。
-
----
-
-## 核心铁律
-
-**未经人类用户明确书面批准，AI Agent 绝对不得执行 `git tag` 或合并发布分支。**
-用户口头/文字要求"发布 vX.Y.Z"即视为批准，但必须先把发版摘要贴全。
+Follow this specification before running any `git tag v*.*.*`, merging a release
+branch, or triggering a production release.
 
 ---
 
-## Changelog（强制）
+## Core Rule
 
-Canonical file: [`docs/changelog.md`](../../../docs/changelog.md)（Keep a Changelog + SemVer）。
-仓库根目录不存在 `CHANGELOG.md`。
+**An AI agent must never execute `git tag` or publish a release without explicit
+human approval.** A direct user request to "release vX.Y.Z" counts as approval,
+provided the full release summary and changelog are prepared and verified.
 
-**落地工作时**（不只是打 tag 时）：把 notable feature / fix / breaking change 写到
-`## [Unreleased]` 下对应的 `### Added` / `### Changed` / `### Fixed` / `### Removed`。
+---
 
-**切 `vX.Y.Z` 时：**
+## Changelog Discipline (Mandatory)
 
-1. 把 `## [Unreleased]` 改名为 `## [X.Y.Z] - YYYY-MM-DD`（当天日期）。
-2. 在其上方插入新的空 `## [Unreleased]`。
-3. 删掉空的小节。禁止出现只有 `misc` / commit 标题 / "various improvements" 的版本。
+Canonical file: [`docs/changelog.md`](../../../docs/changelog.md) (Keep a
+Changelog + SemVer). There is no root `CHANGELOG.md`.
 
-每条 bullet 必须能让用户读懂：
+**When landing notable work** (not only at tag time): record notable features,
+fixes, or breaking changes under `## [Unreleased]` in the appropriate
+`### Added` / `### Changed` / `### Fixed` / `### Removed` section.
 
-| 必须包含 | 示例 |
+**When cutting `vX.Y.Z`**:
+
+1. Rename `## [Unreleased]` to `## [X.Y.Z] - YYYY-MM-DD` (current date).
+2. Insert a fresh empty `## [Unreleased]` heading above it.
+3. Remove empty subsections. Releases containing only `misc`, raw commit titles,
+   or "various improvements" are prohibited.
+
+Every bullet must be self-contained for human readers:
+
+| Required Element | Example |
 | --- | --- |
-| 改了什么 | thin-l7 嗅探到非 HTTP/1.1 时自动回退 L4 |
-| 影响谁 / 哪里 | 所有 `mode = "thin-l7"` 部署；`src/proxy/l7.rs` |
-| 是否破坏性 | Breaking: 无 |
+| What changed | Automatically fall back to L4 when `thin-l7` sniffs non-HTTP/1.1 bytes |
+| Who / where it affects | All `mode = "thin-l7"` deployments; `src/proxy/l7.rs` |
+| Breaking or not | Breaking: No |
 
-拒绝：`- feat: auth`、`- update docs`、`- fix bug`。
+Prohibited bullets: `- feat: auth`, `- update docs`, `- fix bug`.
 
 ---
 
-## 发版 4 步走
+## 4-Step Release Workflow
 
-### 第 1 步：本地门禁全量重跑
+### Step 1: Run Full Local Gates
 
 ```bash
-git status            # 确认工作区干净
+git status            # Confirm worktree is clean
 bash scripts/local-gates.sh
 ```
 
-### 第 2 步：发版三查
+### Step 2: Three Pre-Release Checks
 
-1. **版本号一致性**：`Cargo.toml` 的 `version` 已正确自增。
-2. **Changelog**：`docs/changelog.md` 已把 `[Unreleased]` 转正为
-   `[X.Y.Z] - <date>`，条目可独立阅读。
-3. **敏感信息与构建物扫描**：无私有密钥、`.env`、临时调试日志或未编译产物。
+1. **Version consistency**: `version` in `Cargo.toml` (and `Cargo.lock`) is
+   bumped to `X.Y.Z`.
+2. **Changelog**: `docs/changelog.md` promotes `[Unreleased]` to
+   `[X.Y.Z] - <date>` with clear, human-readable entries.
+3. **Sensitive files & artifacts check**: no private keys, `.env` files, debug
+   dumps, or untracked build artifacts.
 
-### 第 3 步：人工批准硬停
+### Step 3: Human Approval Gate
 
-向用户输出完整发版摘要（拟定 Tag、Commit Hash、**本版全部 changelog 条目**），
-明确请求批准。不得只贴 commit list 代替 changelog。
+Present the complete release summary to the user (proposed tag, commit hash, and
+**all changelog entries for this version**) and obtain explicit approval before
+tagging. Never paste a raw commit list in place of the changelog.
 
-### 第 4 步：打 Tag 并验证
+### Step 4: Tag and Verify
 
-获得批准后：
+Once approved:
 
 ```bash
 git tag -a vX.Y.Z -m "release: vX.Y.Z"
@@ -75,4 +82,4 @@ git push origin main
 git push origin vX.Y.Z
 ```
 
-推完确认远端 tag 指向的 commit 与本地一致。
+Verify that the remote tag points to the exact expected commit hash on `main`.

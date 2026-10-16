@@ -1,39 +1,52 @@
 ---
 name: review
-description: 独立上下文的只读代码评审（critic）：新开会话或只读子代理执行，禁止在生成者对话内自评；先跑确定性门禁再读 diff，输出 file:line 级 findings 与 SHIP/REWORK 结论。Use when reviewing a PR, a finished task, or before requesting human approval.
+description: Independent read-only code review (critic): execute in a separate session or read-only subagent, never self-review in the author context; run deterministic local gates before reading diffs, and output file:line findings with a SHIP or REWORK verdict. Use when reviewing a PR, a finished task, or before requesting human approval.
 ---
 
-# Review（独立只读评审 / critic）
+# Review (Independent Read-Only Critic)
 
-## Symptom / misjudgment
+## Symptom / Misjudgment
 
-生成者顺带「自查」会给自己打高分：同一上下文里既写代码又评代码，注意力已被实现
-细节占满，看不见夹带、幻觉与更简单的做法。本仓库历史上多个问题（设计文档引用
-不存在的能力、脚本改坏括号）都是在**独立复核**时才暴露的。
+An author reviewing their own code in the same context tends to grade
+themselves generously: attention is already saturated by implementation details,
+making piggybacked changes, hallucinated capabilities, or simpler alternatives
+easy to miss. Historical bugs in this repository were caught only during
+**independent critic review**.
 
-## Rule
+## Rules
 
-1. **独立上下文**：评审必须在新会话或只读子代理（无 Write/Edit）中执行；禁止在
-   生成者对话里「顺便看一遍」。
-2. **只读**：评审者不改文件，只报 `file:line` 与建议修法，由生成者修复后重评。
-3. **验证分层**：先跑确定性门禁，全过再读 diff：
+1. **Independent context**: reviews must run in a separate session or a
+   read-only subagent (no file write/edit tools); never "quickly self-review"
+   inside the authoring context.
+2. **Read-only**: the critic never modifies files; it reports `file:line`
+   findings and suggested fixes for the author to address and resubmit.
+3. **Verification layering**: run deterministic local gates first, and read the
+   diff only after they pass:
    ```bash
    bash scripts/local-gates.sh
    ```
-   门禁红了先修门禁，不要带着红灯读代码。
-4. **对照站立约束逐条问**：夹带无关改动？幻觉能力（有定义无调用 / 文档引用不存在
-   的字段）？流式不变量（缓冲/边界/重试/超时分层）是否被破坏？
-5. **不止看对错，还看多余**：「能删的行」和「能简化的分支」是一等产出。
+   If any gate fails, return **REWORK** immediately with the failing gate.
+4. **Check every standing constraint**: piggybacked unrelated edits? Ghost code
+   (defined without callers / docs citing non-existent fields)? Streaming
+   invariants (zero buffering, proven pool boundary, no retry after first byte,
+   layered timeouts, LB boundary) preserved?
+5. **Look for unnecessary complexity**: lines that can be deleted and branches
+   that can be simplified are first-class review findings.
 
 ## Procedure
 
-1. 确认输入：diff 范围与声称完成的内容清单。
-2. 跑确定性门禁；有红直接返回 REWORK + 红项。
-3. 只读走查 diff：先看测试（断言是否断言了行为），再看实现，最后看文档。
-4. 产出 findings：`file:line [blocker|major|minor] 描述`；无 finding 才可给 SHIP。
-5. 结论二选一：**SHIP** 或 **REWORK**（附 blockers）。不允许「基本可以」。
+1. Confirm inputs: diff range and claimed deliverables.
+2. Run deterministic local gates (`bash scripts/local-gates.sh`); if red,
+   return **REWORK** immediately.
+3. Walk the diff read-only: inspect tests first (do assertions test real
+   behavior?), then implementation, then documentation.
+4. Output findings as `file:line [blocker|major|minor] description`; issue
+   **SHIP** only when no blocker or major finding remains.
+5. Verdict is strictly binary: **SHIP** or **REWORK** (with blockers listed).
+   "Mostly fine" is not a valid verdict.
 
 ## Scope
 
-- 本 skill 是评审纪律，不替代 release skill 的人工批准。
-- 生成者修复 REWORK 项后必须重新评审。
+- This skill governs code review discipline and does not replace explicit human
+  approval required by the `release` skill.
+- After fixing **REWORK** items, the author must request a fresh re-review.

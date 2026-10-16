@@ -1,40 +1,48 @@
 ---
 name: pre-push-local-gates
-description: Push 前必须在本地跑满与 CI 等效的门禁（Rust fmt/clippy/tests），禁止把 CI 当本地沙盒。Use before every git push touching src/, tests/, Cargo.toml or CI.
+description: Run full CI-equivalent local quality gates (Rust fmt, clippy, tests) before every git push. Never use CI as a local sandbox. Use before every git push touching src/, tests/, Cargo.toml, or CI.
 ---
 
-# Pre-push local gates（推送前本地门禁）
+# Pre-Push Local Gates
 
-## 核心痛点与禁止项
+## Core Rule & Prohibition
 
-严禁把 CI 当本地沙盒：推送后才发现 lint 报错、rustfmt 未对齐、编译报警、测试
-失败，形成「推 → 挂 → 本地修 → 再推」的低效循环，污染提交历史并浪费 Runner 配额。
+Never use GitHub Actions CI as a local sandbox. Pushing code only to discover
+rustfmt diffs, clippy warnings, compile errors, or test failures creates a
+wasteful "push -> fail -> fix -> push" loop that pollutes commit history and
+burns runner quota.
 
-## 本地门禁执行标准
+## Local Gate Standard
 
-在执行 `git push` 或提 PR 之前，以下命令必须**全部在本地通过**（与 CI 等效）：
+Before running `git push` or opening/updating a PR, all of the following must
+pass locally (100% equivalent to CI):
 
 ```bash
-# 一条命令跑满（推荐）
+# Single command (recommended)
 bash scripts/local-gates.sh
 
-# 首次克隆后安装本地 Git pre-push 钩子（自动在 git push 前执行 local-gates.sh）
+# Install the local Git pre-push hook once after cloning (runs local-gates.sh automatically on git push)
 bash scripts/install-hooks.sh
 
-# 等价手工命令
+# Equivalent manual commands
 cargo fmt --check
 cargo clippy --all-targets -- -D warnings
 cargo test --workspace
 ```
 
-涉及转发/超时/池化语义的改动，还必须确认 `tests/integration.rs` 覆盖了对应行为
-（透传、半关闭、chunked 长流、连接复用、突然断开、自动回退、TLS）。
+Any change touching forwarding, timeouts, or connection pooling semantics must
+also verify that `tests/integration.rs` covers the behavior (passthrough,
+half-close, chunked streaming, connection reuse, abrupt disconnect, automatic L4
+fallback, TLS termination).
 
-发版与打 Tag 前，转入 skill [`release`](../release/SKILL.md) 执行完整流程。
+Before cutting a release or tag, switch to skill [`release`](../release/SKILL.md)
+and follow the full release promoter process.
 
-## 适用范围与纪律
+## Scope & Discipline
 
-- 开发过程中的中间 commit 允许临时不跑全量，但 **push 前最后一次提交必须全绿**。
-- CI 意外挂了：禁止盲猜盲改，必须在本地复现等价的失败命令，本地确认修复后再推送。
-- 判断上游成败时注意管道退出码陷阱：`cmd | tail` 的退出码是 tail 的。本 skill 的
-  `scripts/local-gates.sh` 使用 `set -o pipefail`。
+- Intermediate local commits during active development may skip the full suite,
+  but **the final state before `git push` must pass all local gates**.
+- If CI ever fails unexpectedly: do not guess blindly; reproduce the exact
+  failing command locally, verify the fix locally, and only then push.
+- Watch out for shell pipeline exit code traps (`cmd | tail` returns `tail`'s
+  exit code). `scripts/local-gates.sh` enforces `set -euo pipefail`.
