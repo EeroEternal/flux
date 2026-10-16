@@ -86,37 +86,35 @@
   <rect x="480" y="140" width="60" height="16" rx="3" fill="#DBEAFE"/>
   <text x="510" y="151" text-anchor="middle" font-size="9.5" font-weight="600" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" fill="#1D4ED8">pooled</text>
 
-  <!-- ==================== 3. AI GATEWAYS (LiteLLM / New API / AISIX) ==================== -->
+  <!-- ==================== 3. AI GATEWAYS (LiteLLM #1, LiteLLM #2, New API) ==================== -->
   <g filter="url(#shadow)">
-    <!-- LiteLLM -->
+    <!-- LiteLLM #1 -->
     <rect x="550" y="52" width="180" height="56" rx="7" fill="#FFFFFF" stroke="#CBD5E1" stroke-width="1.5"/>
     <circle cx="566" cy="71" r="4" fill="#10B981"/>
-    <text x="576" y="75" font-size="13" font-weight="700" fill="#0F172A">LiteLLM</text>
+    <text x="576" y="75" font-size="13" font-weight="700" fill="#0F172A">LiteLLM #1</text>
     <text x="562" y="94" font-size="10" fill="#64748B">Auth · Quota · Model routing</text>
 
-    <!-- New API -->
+    <!-- LiteLLM #2 -->
     <rect x="550" y="130" width="180" height="56" rx="7" fill="#FFFFFF" stroke="#CBD5E1" stroke-width="1.5"/>
     <circle cx="566" cy="149" r="4" fill="#10B981"/>
-    <text x="576" y="153" font-size="13" font-weight="700" fill="#0F172A">New API</text>
-    <text x="562" y="172" font-size="10" fill="#64748B">Key management · Token billing</text>
+    <text x="576" y="153" font-size="13" font-weight="700" fill="#0F172A">LiteLLM #2</text>
+    <text x="562" y="172" font-size="10" fill="#64748B">Auth · Quota · Model routing</text>
 
-    <!-- AISIX -->
+    <!-- New API -->
     <rect x="550" y="208" width="180" height="56" rx="7" fill="#FFFFFF" stroke="#CBD5E1" stroke-width="1.5"/>
     <circle cx="566" cy="227" r="4" fill="#10B981"/>
-    <text x="576" y="231" font-size="13" font-weight="700" fill="#0F172A">AISIX</text>
-    <text x="562" y="250" font-size="10" fill="#64748B">Protocol translation · Failover</text>
+    <text x="576" y="231" font-size="13" font-weight="700" fill="#0F172A">New API</text>
+    <text x="562" y="250" font-size="10" fill="#64748B">Key management · Token billing</text>
   </g>
 
-  <!-- Gateways -> Upstream Providers Arrows -->
-  <g fill="none" stroke="#059669" stroke-width="1.5" stroke-dasharray="4 3" marker-end="url(#arrow-emerald)">
+  <!-- Gateways -> Upstream Providers (Strictly isolated 1-to-1 parallel paths, no cross-interference) -->
+  <g fill="none" stroke="#059669" stroke-width="1.6" stroke-dasharray="4 3" marker-end="url(#arrow-emerald)">
     <path d="M 730 80 L 806 80"/>
-    <path d="M 730 80 C 765 80, 770 158, 806 158"/>
     <path d="M 730 158 L 806 158"/>
-    <path d="M 730 236 C 765 236, 770 158, 806 158"/>
     <path d="M 730 236 L 806 236"/>
   </g>
 
-  <!-- ==================== 4. UPSTREAM MODEL PROVIDERS ==================== -->
+  <!-- ==================== 4. UPSTREAM MODEL PROVIDERS (ISOLATED PER GATEWAY) ==================== -->
   <g filter="url(#shadow)">
     <rect x="810" y="54" width="148" height="52" rx="7" fill="#F0FDF4" stroke="#86EFAC" stroke-width="1.5"/>
     <text x="884" y="75" text-anchor="middle" font-size="12.5" font-weight="700" fill="#065F46">OpenAI / Anthropic</text>
@@ -127,8 +125,8 @@
     <text x="884" y="171" text-anchor="middle" font-size="10" fill="#047857">Cloud Model APIs</text>
 
     <rect x="810" y="210" width="148" height="52" rx="7" fill="#F0FDF4" stroke="#86EFAC" stroke-width="1.5"/>
-    <text x="884" y="231" text-anchor="middle" font-size="12.5" font-weight="700" fill="#065F46">vLLM / SGLang</text>
-    <text x="884" y="249" text-anchor="middle" font-size="10" fill="#047857">Self-hosted GPU Cluster</text>
+    <text x="884" y="231" text-anchor="middle" font-size="12.5" font-weight="700" fill="#065F46">Custom / vLLM</text>
+    <text x="884" y="249" text-anchor="middle" font-size="10" fill="#047857">Upstream Channels</text>
   </g>
 
   <!-- Bottom Boundary Annotation Bar -->

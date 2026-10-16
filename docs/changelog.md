@@ -14,6 +14,11 @@ Write bullets that a human can ship from: **what changed**, **who it affects**,
 
 ### Added
 
+- **Prebuilt release binaries & `Dockerfile`**: added GitHub Actions release
+  pipeline ([`.github/workflows/release.yml`](../.github/workflows/release.yml))
+  publishing prebuilt tarballs and SHA-256 checksums for Linux (`x86_64` /
+  `aarch64` musl) and macOS (`aarch64` / `x86_64`) on `v*.*.*` tags, plus a
+  multi-stage [`Dockerfile`](../Dockerfile). Breaking: No.
 - **MIT `LICENSE`, vector topology diagram & observability guide**: added root
   [`LICENSE`](../LICENSE), SVG architecture diagram
   ([`docs/assets/architecture.svg`](assets/architecture.svg)), and dedicated
