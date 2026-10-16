@@ -10,6 +10,8 @@ Write bullets that a human can ship from: **what changed**, **who it affects**,
 
 ## [Unreleased]
 
+## [0.0.4] - 2026-10-16
+
 ### Added
 
 - **Prebuilt release binaries, `Dockerfile` & GHCR / Docker Hub publishing**:
