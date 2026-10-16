@@ -10,6 +10,8 @@ Write bullets that a human can ship from: **what changed**, **who it affects**,
 
 ## [Unreleased]
 
+## [0.0.5] - 2026-10-16
+
 ### Added
 
 - **Immediate client-abort propagation during silent prefill & reasoning pauses (`thin-l7`)**:
@@ -27,9 +29,10 @@ Write bullets that a human can ship from: **what changed**, **who it affects**,
   silently dropping long-context prefill or multi-minute reasoning streams.
   Breaking: No.
 - **Adaptive 64 KiB read window for large fixed-length bodies**: `forward_body`
-  uses a 64 KiB bounded read buffer when streaming `Content-Length > 64 KiB`
-  bodies (`src/proxy/http1.rs`), reducing syscall churn by 4× on multi-megabyte
-  long-context prompts while preserving strict zero-buffering. Breaking: No.
+  and `forward_response_body_or_client_abort` use a 64 KiB bounded read buffer
+  when streaming `Content-Length > 64 KiB` bodies (`src/proxy/http1.rs`),
+  reducing syscall churn by 4× on multi-megabyte long-context prompts while
+  preserving strict zero-buffering and pipelined tail bytes. Breaking: No.
 
 ## [0.0.4] - 2026-10-16
 
