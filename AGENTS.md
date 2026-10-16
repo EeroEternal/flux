@@ -1,6 +1,6 @@
 # AGENTS.md — Code Agent Collaboration Specification
 
-High-density entry point for AI coding agents working on **xFlux**. Its purpose
+High-density entry point for AI coding agents working on **xLB**. Its purpose
 is to eliminate hallucinations, prevent piggybacking, and keep commits
 reproducible. Detailed rules live in [`docs/ai/agents/`](docs/ai/agents/) and
 [`.agents/skills/`](.agents/skills/). Do **not** load every chapter by default.
@@ -48,7 +48,7 @@ needs **≥ 2 independent occurrences** and human review.
 4. **Release guardrail.** Local closed-loop verification first. Do not run
    `git tag` or merge a release branch without explicit human approval (follow
    skill [`release`](.agents/skills/release/SKILL.md)).
-5. **Streaming invariants (xFlux core).** Never buffer a request or response
+5. **Streaming invariants (xLB core).** Never buffer a request or response
    body; only return a backend connection to the pool at a proven message
    boundary; never retry a request once any response byte has flowed.
 6. **Timeout layering is load-bearing.** `connect <= total`, `idle <= total`,
@@ -58,7 +58,7 @@ needs **≥ 2 independent occurrences** and human review.
    the L4 splice byte-for-byte, preserving the bytes already buffered.
 8. **Pre-push local quality gate.** Never use CI as a local sandbox. Run
    `scripts/local-gates.sh` (fmt, clippy `-D warnings`, tests) before pushing.
-9. **LB boundary (HAProxy position).** xFlux forwards bytes, not tokens.
+9. **LB boundary (HAProxy position).** xLB forwards bytes, not tokens.
    Inspect only framing needed to pick a backend, reuse a connection, or
    tear one down (TCP, HTTP heads, Content-Length/chunked, protocol sniff).
    Never parse SSE, NDJSON, JSON, or any payload semantic. Scheduling keys

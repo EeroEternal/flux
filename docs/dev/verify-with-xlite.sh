@@ -1,20 +1,20 @@
 #!/usr/bin/env bash
-# Closed-loop smoke: xFlux in front of a local xlite + stream mock.
+# Closed-loop smoke: xLB in front of a local xlite + stream mock.
 # Not part of the public product surface; working-notes harness only.
 set -euo pipefail
 
-XFLUX_ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
+XLB_ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
 XLITE_ROOT="${XLITE_ROOT:-$HOME/github/xlite}"
-XFLUX_BIN="${XFLUX_BIN:-$XFLUX_ROOT/target/debug/xflux}"
+XLB_BIN="${XLB_BIN:-$XLB_ROOT/target/debug/xlb}"
 XLITE_BIN="${XLITE_BIN:-$XLITE_ROOT/target/release/xlite}"
 MOCK_JS="${MOCK_JS:-$XLITE_ROOT/scripts/stream_mock_server.mjs}"
 
 MOCK_PORT="${MOCK_PORT:-14101}"
 XLITE_PORT="${XLITE_PORT:-18080}"
-XFLUX_PORT="${XFLUX_PORT:-18006}"
+XLB_PORT="${XLB_PORT:-18006}"
 METRICS_PORT="${METRICS_PORT:-19106}"
 
-WORKDIR="$(mktemp -d "${TMPDIR:-/tmp}/xflux-xlite-XXXXXX")"
+WORKDIR="$(mktemp -d "${TMPDIR:-/tmp}/xlb-xlite-XXXXXX")"
 PIDS=()
 
 log() { printf '[verify] %s\n' "$*"; }
@@ -55,7 +55,7 @@ curl_stream() {
     "$url" | tee "$out.timing"
 }
 
-[[ -x "$XFLUX_BIN" ]] || die "xflux binary missing: $XFLUX_BIN (cargo build)"
+[[ -x "$XLB_BIN" ]] || die "xlb binary missing: $XLB_BIN (cargo build)"
 [[ -x "$XLITE_BIN" ]] || die "xlite binary missing: $XLITE_BIN"
 [[ -f "$MOCK_JS" ]] || die "mock missing: $MOCK_JS"
 
@@ -69,7 +69,7 @@ node "$MOCK_JS" \
   --interval-ms 20 \
   --ttft-ms 30 \
   --batch 1 \
-  --label xflux-verify \
+  --label xlb-verify \
   >"$WORKDIR/mock.log" 2>&1 &
 PIDS+=("$!")
 wait_http "http://127.0.0.1:${MOCK_PORT}/health"
@@ -109,9 +109,9 @@ log "import xlite catalog"
 PIDS+=("$!")
 wait_http "http://127.0.0.1:${XLITE_PORT}/health"
 
-cat >"$WORKDIR/xflux.toml" <<EOF
+cat >"$WORKDIR/xlb.toml" <<EOF
 [server]
-bind = "127.0.0.1:${XFLUX_PORT}"
+bind = "127.0.0.1:${XLB_PORT}"
 mode = "thin-l7"
 max_connections = 1024
 
@@ -145,27 +145,27 @@ enabled = true
 bind = "127.0.0.1:${METRICS_PORT}"
 EOF
 
-log "start xflux"
-"$XFLUX_BIN" --config "$WORKDIR/xflux.toml" >"$WORKDIR/xflux.log" 2>&1 &
+log "start xlb"
+"$XLB_BIN" --config "$WORKDIR/xlb.toml" >"$WORKDIR/xlb.log" 2>&1 &
 PIDS+=("$!")
-wait_http "http://127.0.0.1:${XFLUX_PORT}/health"
+wait_http "http://127.0.0.1:${XLB_PORT}/health"
 
 DIRECT="http://127.0.0.1:${XLITE_PORT}/v1/chat/completions"
-VIA="http://127.0.0.1:${XFLUX_PORT}/v1/chat/completions"
+VIA="http://127.0.0.1:${XLB_PORT}/v1/chat/completions"
 
 log "direct xlite"
 curl_stream "$DIRECT" "$WORKDIR/direct"
-log "via xflux (1)"
-curl_stream "$VIA" "$WORKDIR/xflux1"
-log "via xflux (2)"
-curl_stream "$VIA" "$WORKDIR/xflux2"
+log "via xlb (1)"
+curl_stream "$VIA" "$WORKDIR/xlb1"
+log "via xlb (2)"
+curl_stream "$VIA" "$WORKDIR/xlb2"
 
 METRICS="$(curl -fsS "http://127.0.0.1:${METRICS_PORT}/metrics")"
 printf '%s\n' "$METRICS" >"$WORKDIR/metrics.txt"
-echo "$METRICS" | rg -n 'xflux_conn_(new|reuse)_total|xflux_ttft_delta_ms_count|xflux_bytes_total|xflux_backend_healthy' || true
+echo "$METRICS" | rg -n 'xlb_conn_(new|reuse)_total|xlb_ttft_delta_ms_count|xlb_bytes_total|xlb_backend_healthy' || true
 
-NEW="$(echo "$METRICS" | sed -n 's/^xflux_conn_new_total{[^}]*} //p' | awk '{s+=$1} END {print s+0}')"
-REUSE="$(echo "$METRICS" | sed -n 's/^xflux_conn_reuse_total{[^}]*} //p' | awk '{s+=$1} END {print s+0}')"
+NEW="$(echo "$METRICS" | sed -n 's/^xlb_conn_new_total{[^}]*} //p' | awk '{s+=$1} END {print s+0}')"
+REUSE="$(echo "$METRICS" | sed -n 's/^xlb_conn_reuse_total{[^}]*} //p' | awk '{s+=$1} END {print s+0}')"
 log "backend conns new=$NEW reuse=$REUSE"
 if [[ "$NEW" -lt 1 ]]; then
   die "expected at least one newly dialed backend connection"
@@ -185,7 +185,7 @@ def timing(p):
     return int(m.group(1)), float(m.group(2)), float(m.group(3))
 
 failed = []
-for name in ("direct", "xflux1", "xflux2"):
+for name in ("direct", "xlb1", "xlb2"):
     http, ttfb, total = timing(w / f"{name}.timing")
     raw = (w / f"{name}.body").read_bytes()
     if http != 200:
@@ -199,7 +199,7 @@ for name in ("direct", "xflux1", "xflux2"):
     print(f"{name:7} http={http} ttfb={ttfb:.4f}s total={total:.4f}s body={len(raw)}B")
 
 _, d_ttfb, _ = timing(w / "direct.timing")
-_, f_ttfb, _ = timing(w / "xflux1.timing")
+_, f_ttfb, _ = timing(w / "xlb1.timing")
 delta_ms = (f_ttfb - d_ttfb) * 1000
 print(f"ttfb_delta_ms={delta_ms:.2f}")
 if delta_ms > 50:

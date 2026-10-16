@@ -1,6 +1,6 @@
-//! xFlux: a streaming-first load balancer for AI inference gateways.
+//! xLB: a streaming-first load balancer for AI inference gateways.
 //!
-//! xFlux occupies the HAProxy role in front of gateway instances: connection
+//! xLB occupies the HAProxy role in front of gateway instances: connection
 //! management, scheduling, health checks, timeouts and transparent forwarding.
 //! It forwards bytes, not tokens. Model routing, billing, prompt rewriting and
 //! protocol translation stay in the backends.

@@ -1,4 +1,4 @@
-//! Prometheus metrics for xFlux.
+//! Prometheus metrics for xLB.
 
 use anyhow::Result;
 use prometheus::{
@@ -15,7 +15,7 @@ const DURATION_BUCKETS: &[f64] = &[
     0.1, 0.5, 1.0, 2.0, 5.0, 10.0, 30.0, 60.0, 120.0, 300.0, 600.0, 1800.0, 3600.0,
 ];
 
-/// Every metric xFlux exposes.
+/// Every metric xLB exposes.
 pub struct Metrics {
     /// Registry used to render the Prometheus text exposition.
     pub registry: Registry,
@@ -64,82 +64,79 @@ impl Metrics {
 
         let ttft_delta_ms = Histogram::with_opts(
             HistogramOpts::new(
-                "xflux_ttft_delta_ms",
+                "xlb_ttft_delta_ms",
                 "Proxy-added first-byte latency in ms (TTFB; not token-aware)",
             )
             .buckets(TTFT_BUCKETS.to_vec()),
         )?;
         let upstream_ttft_ms = Histogram::with_opts(
             HistogramOpts::new(
-                "xflux_upstream_ttft_ms",
+                "xlb_upstream_ttft_ms",
                 "Time from request completion to backend first byte in ms (TTFB; not token-aware)",
             )
             .buckets(TTFT_BUCKETS.to_vec()),
         )?;
         let client_ttft_ms = Histogram::with_opts(
             HistogramOpts::new(
-                "xflux_client_ttft_ms",
+                "xlb_client_ttft_ms",
                 "Time from request completion to client first byte in ms (TTFB; not token-aware)",
             )
             .buckets(TTFT_BUCKETS.to_vec()),
         )?;
         let stream_duration_seconds = Histogram::with_opts(
-            HistogramOpts::new("xflux_stream_duration_seconds", "Whole stream duration (s)")
+            HistogramOpts::new("xlb_stream_duration_seconds", "Whole stream duration (s)")
                 .buckets(DURATION_BUCKETS.to_vec()),
         )?;
         let active_streams = IntGaugeVec::new(
-            Opts::new("xflux_active_streams", "In-flight streams"),
+            Opts::new("xlb_active_streams", "In-flight streams"),
             &["backend"],
         )?;
         let conn_reuse_total = IntCounterVec::new(
             Opts::new(
-                "xflux_conn_reuse_total",
+                "xlb_conn_reuse_total",
                 "Backend connections reused from the pool",
             ),
             &["backend"],
         )?;
         let conn_new_total = IntCounterVec::new(
-            Opts::new("xflux_conn_new_total", "Backend connections freshly dialed"),
+            Opts::new("xlb_conn_new_total", "Backend connections freshly dialed"),
             &["backend"],
         )?;
         let conn_dial_errors_total = IntCounterVec::new(
-            Opts::new("xflux_conn_dial_errors_total", "Backend dial failures"),
+            Opts::new("xlb_conn_dial_errors_total", "Backend dial failures"),
             &["backend"],
         )?;
         let rejected_total = IntCounterVec::new(
-            Opts::new("xflux_rejected_total", "Rejected client requests"),
+            Opts::new("xlb_rejected_total", "Rejected client requests"),
             &["reason"],
         )?;
         let health_check_failures = IntCounterVec::new(
-            Opts::new("xflux_health_check_failures", "Failed health probes"),
+            Opts::new("xlb_health_check_failures", "Failed health probes"),
             &["backend"],
         )?;
         let health_check_success_total = IntCounterVec::new(
-            Opts::new(
-                "xflux_health_check_success_total",
-                "Successful health probes",
-            ),
+            Opts::new("xlb_health_check_success_total", "Successful health probes"),
             &["backend"],
         )?;
         let upstream_errors_total = IntCounterVec::new(
-            Opts::new("xflux_upstream_errors_total", "Upstream transfer failures"),
+            Opts::new("xlb_upstream_errors_total", "Upstream transfer failures"),
             &["backend"],
         )?;
         let client_errors_total =
-            IntCounter::new("xflux_client_errors_total", "Client-side transfer failures")?;
+            IntCounter::new("xlb_client_errors_total", "Client-side transfer failures")?;
         let bytes_total = IntCounterVec::new(
-            Opts::new("xflux_bytes_total", "Bytes proxied"),
+            Opts::new("xlb_bytes_total", "Bytes proxied"),
             &["backend", "direction"],
         )?;
         let connections_total =
-            IntCounter::new("xflux_connections_total", "Client connections accepted")?;
+            IntCounter::new("xlb_connections_total", "Client connections accepted")?;
         let active_connections = IntGauge::new(
-            "xflux_active_connections",
+            "xlb_active_connections",
             "Currently open client connections",
         )?;
         let backend_healthy = IntGaugeVec::new(
             Opts::new(
-                "xflux_backend_healthy",
+                "xlb_backend_healthy",
                 "Backend health (1 healthy, 0 unhealthy)",
             ),
             &["backend"],

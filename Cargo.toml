@@ -1,16 +1,16 @@
 [package]
-name = "xflux"
+name = "xlb"
 version = "0.0.2"
 edition = "2021"
-description = "xFlux: a streaming-first AI load balancer"
+description = "xLB: a streaming-first AI load balancer"
 license = "MIT"
 
 [lib]
-name = "xflux"
+name = "xlb"
 path = "src/lib.rs"
 
 [[bin]]
-name = "xflux"
+name = "xlb"
 path = "src/main.rs"
 
 [dependencies]

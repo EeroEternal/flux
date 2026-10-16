@@ -773,7 +773,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "xflux"
+name = "xlb"
 version = "0.0.2"
 dependencies = [
  "anyhow",

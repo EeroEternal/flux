@@ -5,7 +5,7 @@ use serde::Deserialize;
 use std::net::SocketAddr;
 use std::time::Duration;
 
-/// Top level xFlux configuration.
+/// Top level xLB configuration.
 #[derive(Debug, Clone, Deserialize)]
 pub struct Config {
     pub server: ServerConfig,
@@ -34,7 +34,7 @@ pub struct ServerConfig {
     /// Set `TCP_NODELAY` on accepted client sockets.
     #[serde(default = "default_true")]
     pub tcp_nodelay: bool,
-    /// Enable `SO_REUSEPORT` so several xFlux processes can share a port.
+    /// Enable `SO_REUSEPORT` so several xLB processes can share a port.
     #[serde(default)]
     pub reuseport: bool,
     /// Maximum size of a single HTTP message head in thin-l7 mode.
@@ -157,7 +157,7 @@ pub struct BackendsConfig {
     /// Scheduling algorithm.
     #[serde(default)]
     pub algorithm: Algorithm,
-    /// Lightweight health endpoint probed by xFlux.
+    /// Lightweight health endpoint probed by xLB.
     #[serde(default = "default_health_path")]
     pub health_check_path: String,
     /// Probe interval. Set to `"0s"` to disable active health checking.

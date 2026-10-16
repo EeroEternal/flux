@@ -1,4 +1,4 @@
-# xFlux Architecture
+# xLB Architecture
 
 This document describes how the design in [`design.md`](design.md) is realised in
 code. It is the reference for anyone touching `src/proxy/`, timeouts, pooling or
@@ -26,7 +26,7 @@ src/
 
 1. `server::bind` creates the socket (with `SO_REUSEPORT` when configured).
 2. The accept loop enforces `server.max_connections` with a semaphore; over-limit
-   connections are counted as `xflux_rejected_total{reason="queue_full"}`.
+   connections are counted as `xlb_rejected_total{reason="queue_full"}`.
 3. If `server.tls.enabled`, the raw TCP stream is wrapped with `TlsAcceptor`
    before any parsing happens. The decrypted stream and a plain TCP stream are
    indistinguishable to the proxy.
@@ -42,7 +42,7 @@ backend connection the bytes look like:
 [response 1 head][response 1 body][response 2 head][response 2 body]...
 ```
 
-To hand that connection to a *different* client, xFlux must know exactly where
+To hand that connection to a *different* client, xLB must know exactly where
 response 1 ends. L4 does not parse HTTP, so it cannot know. If it guessed (for
 example "idle for N seconds means done"), a backend that is slow to produce the
 next chunk — normal during model thinking — would be misclassified and the next
@@ -89,7 +89,7 @@ switch.
 `server::load_tls` builds a rustls `ServerConfig` from PEM cert/key files and
 advertises only `http/1.1` via ALPN. TLS termination is orthogonal to the
 forwarding mode: `mode="l4"` splices the decrypted bytes; `mode="thin-l7"`
-additionally gets request-level pooling. xFlux rejects config where TLS is enabled
+additionally gets request-level pooling. xLB rejects config where TLS is enabled
 without both `cert` and `key`.
 
 ## Timeout model
@@ -132,7 +132,7 @@ the backend's first byte) or `idle` (afterwards). The splice is then cancelled.
 - Retries apply **only** to connection establishment and re-select a backend.
   In `thin-l7`, if a connection checked out from the idle pool (`reused = true`)
   fails while writing the request or immediately closes with 0 response bytes
-  (HTTP/1.1 keep-alive timeout race), xFlux dials one fresh connection on the
+  (HTTP/1.1 keep-alive timeout race), xLB dials one fresh connection on the
   same lease before any response byte has been sent to the client.
 
 ## Invariants (must hold after any change)
@@ -143,14 +143,14 @@ the backend's first byte) or `idle` (afterwards). The splice is then cancelled.
 4. `connect <= total`, `idle <= total`, and `first_byte <= total`; `fin` is independent.
 5. Any protocol thin-l7 cannot parse is forwarded byte-for-byte via L4.
 6. Every metric that has a success/increment path has a failure counterpart.
-7. Payload bytes are opaque. xFlux must not parse SSE, NDJSON, JSON, or any
+7. Payload bytes are opaque. xLB must not parse SSE, NDJSON, JSON, or any
    application body to make forwarding, pooling, retry, or scheduling decisions.
 
 ## Testing strategy
 
 - Unit tests live next to the code (`duration`, `http1` chunk scanner, pool,
   scheduler, health status parsing).
-- `tests/integration.rs` starts real mock gateways and a real xFlux server. It
+- `tests/integration.rs` starts real mock gateways and a real xLB server. It
   covers pass-through, half-close, chunked streaming, backend reuse, pipelined
   requests, abrupt backend death, leastconn scheduling, automatic L4 fallback
   (HTTP/2, binary, Upgrade), TLS termination, opaque SSE/`[DONE]` bodies,

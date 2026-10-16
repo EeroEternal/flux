@@ -1,8 +1,8 @@
 # Engineering Hard Rules
 
-This file adapts the console-kit engineering rules to xFlux. Rules whose original
+This file adapts the console-kit engineering rules to xLB. Rules whose original
 motivation was database/UI specific are omitted; universal rules are preserved
-and extended with xFlux's streaming invariants.
+and extended with xLB's streaming invariants.
 
 ## 1. No Piggybacking (Silent Drift)
 
@@ -90,9 +90,9 @@ In shell pipelines, the default exit code is that of the **last** command:
 
 ---
 
-## 7. Streaming Core Invariants (xFlux Specific, Highest Priority)
+## 7. Streaming Core Invariants (xLB Specific, Highest Priority)
 
-Every change in xFlux must preserve these four invariants:
+Every change in xLB must preserve these four invariants:
 
 1. **Zero body buffering**: `forward_body` holds at most one bounded read chunk
    at a time; L4 uses `copy_bidirectional`. Never introduce an intermediate
@@ -128,7 +128,7 @@ tests in `tests/integration.rs`.
 
 ## 9. Load Balancer Boundary (HAProxy Position, Never Drift into Gateway Logic)
 
-xFlux is an L4/Thin-L7 load balancer in front of long-lived streams, not an AI
+xLB is an L4/Thin-L7 load balancer in front of long-lived streams, not an AI
 inference gateway. Apply this rule when reviewing hot paths:
 
 > **Touch only the framing required to decide which backend to pick, whether a

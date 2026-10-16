@@ -61,7 +61,7 @@ async fn probe(backend: &Backend, path: &str, probe_timeout: Duration) -> bool {
         format!("/{path}")
     };
     let request = format!(
-        "GET {path} HTTP/1.1\r\nHost: {addr}\r\nConnection: close\r\nUser-Agent: xflux-health\r\n\r\n"
+        "GET {path} HTTP/1.1\r\nHost: {addr}\r\nConnection: close\r\nUser-Agent: xlb-health\r\n\r\n"
     );
     let result = tokio::time::timeout(probe_timeout, async move {
         let mut socket = TcpStream::connect(addr).await?;

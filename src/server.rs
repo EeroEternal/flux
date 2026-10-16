@@ -30,15 +30,15 @@ pub struct AppState {
     pub tls: Option<TlsAcceptor>,
 }
 
-/// A running xFlux instance.
-pub struct XFluxServer {
-    /// The address xFlux is listening on.
+/// A running xLB instance.
+pub struct XlbServer {
+    /// The address xLB is listening on.
     pub addr: SocketAddr,
     shutdown: watch::Sender<bool>,
     handles: Vec<JoinHandle<()>>,
 }
 
-impl XFluxServer {
+impl XlbServer {
     /// Bind, start accepting and start background tasks.
     pub async fn start(config: Config) -> anyhow::Result<Self> {
         config.validate()?;
@@ -146,7 +146,7 @@ fn load_tls(config: &TlsConfig) -> anyhow::Result<Option<TlsAcceptor>> {
     let mut server_config = rustls::ServerConfig::builder()
         .with_no_client_auth()
         .with_single_cert(certs, key)?;
-    // Advertise HTTP/1.1 only; xFlux does not proxy HTTP/2 in thin-l7.
+    // Advertise HTTP/1.1 only; xLB does not proxy HTTP/2 in thin-l7.
     server_config.alpn_protocols = vec![b"http/1.1".to_vec()];
     tracing::info!(cert = %cert_path, "TLS termination enabled");
     Ok(Some(TlsAcceptor::from(Arc::new(server_config))))

@@ -10,6 +10,14 @@ Write bullets that a human can ship from: **what changed**, **who it affects**,
 
 ## [Unreleased]
 
+### Changed
+
+- **Renamed project to xLB (`xlb`)**: crate, binary (`xlb`), server type
+  (`XlbServer`), health probe `User-Agent` (`xlb-health`), JSON log env var
+  (`XLB_LOG_JSON`), default log filter (`xlb=info`), and all Prometheus metric
+  names (`xlb_*`) are unified under the `xlb` namespace. Breaking: Yes
+  (replaces `xflux` / `XFLUX_LOG_JSON` / `xflux_*`).
+
 ## [0.0.2] - 2026-10-16
 
 ### Added

@@ -1,17 +1,17 @@
-# xFlux
+# xLB
 
-**xFlux** is a streaming-first load balancer for AI inference gateways. It sits
+**xLB** is a streaming-first load balancer for AI inference gateways. It sits
 in front of one or more gateway instances and
 forwards long-lived, non-idempotent streaming POSTs with as little added latency
 as possible.
 
-xFlux occupies the HAProxy role: it forwards bytes, not tokens. Model selection,
+xLB occupies the HAProxy role: it forwards bytes, not tokens. Model selection,
 token accounting, prompt rewriting and protocol translation stay in the
-backends. xFlux only does connection management, scheduling, health checking,
+backends. xLB only does connection management, scheduling, health checking,
 timeouts and transparent forwarding.
 
-> Why *xFlux*? A short name for the thing that matters here: a long-lived,
-> continuously flowing stream in the X inference stack.
+> Why *xLB*? A short, self-explanatory name for the streaming load balancer
+> (`LB`) in the X inference stack (`xLB` → `xRouter` / `xlite` → `Xinference`).
 
 ## What is implemented
 
@@ -32,7 +32,7 @@ timeouts and transparent forwarding.
 
 ## Modes and the connection-reuse tradeoff
 
-xFlux has two forwarding modes:
+xLB has two forwarding modes:
 
 - **`l4`** (default) — a pure TCP splice. No HTTP parsing overhead, so TTFT
   noise is minimal. A client connection is mapped to one backend connection and
@@ -53,7 +53,7 @@ straight through; nothing is aggregated, transformed or decoded.
 ### Automatic L4 fallback (thin-l7 only)
 
 thin-l7 only understands HTTP/1.1. If the first bytes of a connection look like
-something else, xFlux stops parsing and transparently switches to the raw L4
+something else, xLB stops parsing and transparently switches to the raw L4
 splice, forwarding the bytes it already buffered and then shuttling the rest:
 
 - first byte is not an uppercase HTTP method character (TLS records, binary);
@@ -66,14 +66,14 @@ client never notices. In l4 mode all of these are passed through natively.
 
 ### TLS termination
 
-xFlux can optionally terminate TLS for clients (`[server.tls]`). Client streams
+xLB can optionally terminate TLS for clients (`[server.tls]`). Client streams
 are then decrypted and handed to the normal forwarding path, so HTTPS clients
 reach plaintext gateways without a sidecar. Only HTTP/1.1 is advertised via
 ALPN. TLS is terminated in Rust with rustls (ring provider); the certificate and
 key are read from PEM files at startup.
 
 Note that TLS termination and `l4` mode are independent: enabling TLS only
-affects the client→xFlux leg. With `mode = "l4"` xFlux still splices the
+affects the client→xLB leg. With `mode = "l4"` xLB still splices the
 decrypted bytes to the backend; with `mode = "thin-l7"` it additionally gets
 request-level connection reuse.
 
@@ -99,9 +99,9 @@ src/
 
 ```bash
 cargo build --release
-./target/release/xflux --config config.toml
+./target/release/xlb --config config.toml
 # or validate only
-./target/release/xflux --check --config config.toml
+./target/release/xlb --check --config config.toml
 ```
 
 Example `config.toml`:
@@ -115,8 +115,8 @@ reuseport = false
 
 # [server.tls]              # optional client-facing TLS termination
 # enabled = true
-# cert = "/etc/xflux/tls/fullchain.pem"
-# key = "/etc/xflux/tls/privkey.pem"
+# cert = "/etc/xlb/tls/fullchain.pem"
+# key = "/etc/xlb/tls/privkey.pem"
 
 [timeouts]
 connect = "5s"            # backend connection establishment
@@ -163,24 +163,24 @@ Every metric is exposed on `GET /metrics`.
 
 | Metric | Type | Meaning |
 |--------|------|---------|
-| `xflux_ttft_delta_ms` | histogram | Proxy-added first-byte latency (TTFB, not first token) |
-| `xflux_upstream_ttft_ms` | histogram | Request fully sent → backend first byte (TTFB) |
-| `xflux_client_ttft_ms` | histogram | Request fully sent → client first byte (TTFB) |
-| `xflux_stream_duration_seconds` | histogram | Whole stream duration |
-| `xflux_active_streams{backend}` | gauge | In-flight streams |
-| `xflux_conn_reuse_total{backend}` | counter | Connections taken from the idle pool |
-| `xflux_conn_new_total{backend}` | counter | Connections freshly dialed |
-| `xflux_conn_dial_errors_total{backend}` | counter | Failed dials |
-| `xflux_rejected_total{reason}` | counter | `unhealthy`, `queue_full`, `timeout`, `bad_request` |
-| `xflux_health_check_failures{backend}` | counter | Failed probes |
-| `xflux_health_check_success_total{backend}` | counter | Successful probes |
-| `xflux_backend_healthy{backend}` | gauge | 1 healthy / 0 unhealthy |
-| `xflux_upstream_errors_total{backend}` | counter | Upstream transfer failures |
-| `xflux_bytes_total{backend,direction}` | counter | Bytes proxied |
-| `xflux_connections_total` | counter | Client connections accepted |
-| `xflux_active_connections` | gauge | Open client connections |
+| `xlb_ttft_delta_ms` | histogram | Proxy-added first-byte latency (TTFB, not first token) |
+| `xlb_upstream_ttft_ms` | histogram | Request fully sent → backend first byte (TTFB) |
+| `xlb_client_ttft_ms` | histogram | Request fully sent → client first byte (TTFB) |
+| `xlb_stream_duration_seconds` | histogram | Whole stream duration |
+| `xlb_active_streams{backend}` | gauge | In-flight streams |
+| `xlb_conn_reuse_total{backend}` | counter | Connections taken from the idle pool |
+| `xlb_conn_new_total{backend}` | counter | Connections freshly dialed |
+| `xlb_conn_dial_errors_total{backend}` | counter | Failed dials |
+| `xlb_rejected_total{reason}` | counter | `unhealthy`, `queue_full`, `timeout`, `bad_request` |
+| `xlb_health_check_failures{backend}` | counter | Failed probes |
+| `xlb_health_check_success_total{backend}` | counter | Successful probes |
+| `xlb_backend_healthy{backend}` | gauge | 1 healthy / 0 unhealthy |
+| `xlb_upstream_errors_total{backend}` | counter | Upstream transfer failures |
+| `xlb_bytes_total{backend,direction}` | counter | Bytes proxied |
+| `xlb_connections_total` | counter | Client connections accepted |
+| `xlb_active_connections` | gauge | Open client connections |
 
-Logs are structured via `tracing`; set `XFLUX_LOG_JSON=1` for JSON and
+Logs are structured via `tracing`; set `XLB_LOG_JSON=1` for JSON and
 `RUST_LOG` for the filter.
 
 ## Design rules enforced by the code
@@ -203,7 +203,7 @@ Logs are structured via `tracing`; set `XFLUX_LOG_JSON=1` for JSON and
 cargo test
 ```
 
-Integration tests start real mock gateways and a real xFlux server and cover
+Integration tests start real mock gateways and a real xLB server and cover
 pass-through, half-close, chunked streaming, backend connection reuse,
 pipelined requests, abrupt backend death, least-connections scheduling,
 automatic L4 fallback (HTTP/2 preface, binary protocols, upgrades) and TLS
@@ -218,8 +218,8 @@ curl -o /dev/null -w 'direct ttft=%{time_starttransfer}s\n' \
   -d '{"model":"mock","stream":true}' \
   http://10.56.88.32:8001/v1/chat/completions
 
-# through xflux (thin-l7 so the pool is exercised)
-curl -o /dev/null -w 'xflux  ttft=%{time_starttransfer}s\n' \
+# through xlb (thin-l7 so the pool is exercised)
+curl -o /dev/null -w 'xlb  ttft=%{time_starttransfer}s\n' \
   -H 'Content-Type: application/json' \
   -d '{"model":"mock","stream":true}' \
   http://10.56.88.31:8006/v1/chat/completions

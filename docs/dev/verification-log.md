@@ -1,6 +1,6 @@
 # Verification log
 
-Evidence recorded while validating xFlux. Re-run the commands to reproduce.
+Evidence recorded while validating xLB. Re-run the commands to reproduce.
 
 ## Unreleased — 2026-10-15
 

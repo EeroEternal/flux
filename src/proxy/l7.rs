@@ -1,13 +1,13 @@
 //! Thin L7 forwarding.
 //!
-//! xFlux parses only the request/response heads, then streams bodies verbatim.
+//! xLB parses only the request/response heads, then streams bodies verbatim.
 //! Bodies are opaque: no SSE, NDJSON or JSON inspection. Because it knows
 //! exactly where a response body ends (HTTP framing, not `[DONE]`), it can
 //! safely return a backend connection to the pool and serve subsequent requests
 //! on a client keep-alive connection from any backend.
 //!
 //! When the first bytes look like something other than HTTP/1.1 — TLS, HTTP/2,
-//! WebSocket/CONNECT upgrades, or an arbitrary binary protocol — xFlux stops
+//! WebSocket/CONNECT upgrades, or an arbitrary binary protocol — xLB stops
 //! parsing and transparently switches to the L4 splice, forwarding whatever it
 //! already read and then shuttling raw bytes. This keeps the pooling benefits
 //! for the common case without breaking protocol transparency.

@@ -1,4 +1,4 @@
-# xFlux configuration.
+# xLB configuration.
 
 [server]
 bind = "0.0.0.0:8006"
@@ -9,11 +9,11 @@ reuseport = false
 max_header_bytes = 65536       # thin-l7 only
 
 # Optional TLS termination for client connections. When enabled, clients speak
-# HTTPS to xFlux; xFlux still forwards plaintext HTTP to the gateways.
+# HTTPS to xLB; xLB still forwards plaintext HTTP to the gateways.
 # [server.tls]
 # enabled = false
-# cert = "/etc/xflux/tls/fullchain.pem"
-# key = "/etc/xflux/tls/privkey.pem"
+# cert = "/etc/xlb/tls/fullchain.pem"
+# key = "/etc/xlb/tls/privkey.pem"
 
 [timeouts]
 connect = "5s"

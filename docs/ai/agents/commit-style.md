@@ -15,7 +15,7 @@ Common `type` values:
 - `chore` — build, release, or dependency maintenance
 - `ci` — CI / workflow changes
 
-Common xFlux `scope` values: `proxy`, `l4`, `l7`, `pool`, `scheduler`, `health`,
+Common xLB `scope` values: `proxy`, `l4`, `l7`, `pool`, `scheduler`, `health`,
 `metrics`, `config`, `server`, `tls`, `docs`, `ci`, `release`.
 
 **The subject line must accurately reflect the diff**. Prohibited patterns:

@@ -1,6 +1,6 @@
 use anyhow::Context;
-use xflux::config::Config;
-use xflux::server::XFluxServer;
+use xlb::config::Config;
+use xlb::server::XlbServer;
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
@@ -19,16 +19,16 @@ async fn main() -> anyhow::Result<()> {
         return Ok(());
     }
 
-    let server = XFluxServer::start(config).await?;
+    let server = XlbServer::start(config).await?;
     tracing::info!(
         addr = %server.addr,
-        "xflux listening (press Ctrl-C to stop)"
+        "xlb listening (press Ctrl-C to stop)"
     );
 
     wait_for_shutdown().await;
     tracing::info!("shutdown signal received");
     server.stop().await;
-    tracing::info!("xflux stopped");
+    tracing::info!("xlb stopped");
     Ok(())
 }
 
@@ -62,17 +62,17 @@ fn parse_args() -> Options {
 
 fn print_help() {
     println!(
-        "xflux - streaming-first AI load balancer\n\n\
-         USAGE:\n  xflux [OPTIONS] [CONFIG]\n\n\
+        "xlb - streaming-first AI load balancer\n\n\
+         USAGE:\n  xlb [OPTIONS] [CONFIG]\n\n\
          OPTIONS:\n  -c, --config <PATH>  Path to the TOML config (default: config.toml)\n      --check          Validate the config and exit\n  -h, --help           Print help\n\n\
-         ENV:\n  RUST_LOG             Log filter (default: xflux=info)\n  XFLUX_LOG_JSON       Set to 1 for JSON logs"
+         ENV:\n  RUST_LOG             Log filter (default: xlb=info)\n  XLB_LOG_JSON       Set to 1 for JSON logs"
     );
 }
 
 fn init_tracing() {
     use tracing_subscriber::EnvFilter;
-    let filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("xflux=info"));
-    let json = std::env::var("XFLUX_LOG_JSON")
+    let filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("xlb=info"));
+    let json = std::env::var("XLB_LOG_JSON")
         .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
         .unwrap_or(false);
     if json {

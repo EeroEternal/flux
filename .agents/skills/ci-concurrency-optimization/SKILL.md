@@ -1,6 +1,6 @@
 ---
 name: ci-concurrency-optimization
-description: GitHub Actions CI concurrency cancellation, path-based change filtering, and Rust cache anti-thrashing rules. Use when configuring, debugging, or optimizing CI pipelines for xFlux.
+description: GitHub Actions CI concurrency cancellation, path-based change filtering, and Rust cache anti-thrashing rules. Use when configuring, debugging, or optimizing CI pipelines for xLB.
 ---
 
 # CI Concurrency & Cache Optimization

@@ -1,6 +1,6 @@
 //! Minimal HTTP/1.1 framing helpers.
 //!
-//! xFlux never aggregates bodies. These helpers only locate message boundaries
+//! xLB never aggregates bodies. These helpers only locate message boundaries
 //! so that (a) request/response heads can be forwarded verbatim, (b) bodies can
 //! be streamed through without buffering, and (c) a backend connection can be
 //! safely returned to the pool once a response has been fully consumed.
@@ -132,7 +132,7 @@ pub enum BodyKind {
     UntilClose,
 }
 
-/// A parsed HTTP request line plus the framing headers xFlux cares about.
+/// A parsed HTTP request line plus the framing headers xLB cares about.
 #[derive(Debug, Clone)]
 pub struct RequestHead {
     /// Request method.

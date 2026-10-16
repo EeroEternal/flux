@@ -1,6 +1,6 @@
-//! End-to-end integration tests for xFlux.
+//! End-to-end integration tests for xLB.
 //!
-//! These spin up mock gateway backends, start a real xFlux server on an
+//! These spin up mock gateway backends, start a real xLB server on an
 //! ephemeral port, and exercise the behaviors the design doc calls out:
 //! pass-through, half-close, long streams, connection reuse, sudden backend
 //! death and least-connections scheduling.
@@ -15,8 +15,8 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
 use tokio_rustls::rustls::{self, pki_types::ServerName};
 use tokio_rustls::TlsConnector;
-use xflux::config::Config;
-use xflux::server::XFluxServer;
+use xlb::config::Config;
+use xlb::server::XlbServer;
 
 type Handler = Arc<dyn Fn(TcpStream) -> Pin<Box<dyn Future<Output = ()> + Send>> + Send + Sync>;
 
@@ -38,16 +38,16 @@ async fn spawn_backend(handler: Handler, conns: Arc<AtomicUsize>) -> SocketAddr 
     addr
 }
 
-async fn start_xflux(mode: &str, backends: &[SocketAddr]) -> XFluxServer {
-    start_xflux_cfg(mode, backends, "leastconn", 0).await
+async fn start_xlb(mode: &str, backends: &[SocketAddr]) -> XlbServer {
+    start_xlb_cfg(mode, backends, "leastconn", 0).await
 }
 
-async fn start_xflux_cfg(
+async fn start_xlb_cfg(
     mode: &str,
     backends: &[SocketAddr],
     algorithm: &str,
     max_retries: u32,
-) -> XFluxServer {
+) -> XlbServer {
     let mut servers = String::new();
     for addr in backends {
         servers.push_str(&format!(
@@ -84,7 +84,7 @@ enabled = false
 "#
     );
     let config = Config::from_toml(&text).unwrap();
-    XFluxServer::start(config).await.unwrap()
+    XlbServer::start(config).await.unwrap()
 }
 
 fn find(haystack: &[u8], needle: &[u8]) -> Option<usize> {
@@ -111,14 +111,14 @@ fn echo_backend() -> Handler {
 }
 
 fn write_temp_file(name: &str, contents: &str) -> String {
-    let dir = std::env::temp_dir().join(format!("xflux-it-{}", std::process::id()));
+    let dir = std::env::temp_dir().join(format!("xlb-it-{}", std::process::id()));
     std::fs::create_dir_all(&dir).unwrap();
     let path = dir.join(name);
     std::fs::write(&path, contents).unwrap();
     path.to_string_lossy().into_owned()
 }
 
-async fn start_xflux_tls(backend: SocketAddr, cert: &str, key: &str) -> XFluxServer {
+async fn start_xlb_tls(backend: SocketAddr, cert: &str, key: &str) -> XlbServer {
     let text = format!(
         r#"
 [server]
@@ -156,7 +156,7 @@ enabled = false
 "#
     );
     let config = Config::from_toml(&text).unwrap();
-    XFluxServer::start(config).await.unwrap()
+    XlbServer::start(config).await.unwrap()
 }
 
 /// Minimal test HTTP client that preserves read-ahead between responses.
@@ -287,7 +287,7 @@ async fn l4_passes_bytes_through() {
         })
     });
     let backend = spawn_backend(handler, conns.clone()).await;
-    let server = start_xflux("l4", &[backend]).await;
+    let server = start_xlb("l4", &[backend]).await;
 
     let mut client = TcpStream::connect(server.addr).await.unwrap();
     client.write_all(b"hello").await.unwrap();
@@ -312,7 +312,7 @@ async fn l4_supports_half_close() {
         })
     });
     let backend = spawn_backend(handler, conns.clone()).await;
-    let server = start_xflux("l4", &[backend]).await;
+    let server = start_xlb("l4", &[backend]).await;
 
     let mut client = TcpStream::connect(server.addr).await.unwrap();
     client.write_all(b"ping").await.unwrap();
@@ -327,15 +327,15 @@ async fn l4_supports_half_close() {
 async fn thin_l7_forwards_and_reuses_backend_connection() {
     let conns = Arc::new(AtomicUsize::new(0));
     let backend = spawn_backend(http_backend("pong", true), conns.clone()).await;
-    let server = start_xflux("thin-l7", &[backend]).await;
+    let server = start_xlb("thin-l7", &[backend]).await;
 
     let mut client = TestClient::connect(server.addr).await;
-    client.send(b"GET /a HTTP/1.1\r\nHost: xflux\r\n\r\n").await;
+    client.send(b"GET /a HTTP/1.1\r\nHost: xlb\r\n\r\n").await;
     let first = client.read_response().await;
     assert!(first.contains("200 OK"));
     assert!(first.ends_with("pong"));
 
-    client.send(b"GET /b HTTP/1.1\r\nHost: xflux\r\n\r\n").await;
+    client.send(b"GET /b HTTP/1.1\r\nHost: xlb\r\n\r\n").await;
     let second = client.read_response().await;
     assert!(second.contains("200 OK"));
     assert!(second.ends_with("pong"));
@@ -349,11 +349,11 @@ async fn thin_l7_forwards_and_reuses_backend_connection() {
 async fn thin_l7_handles_pipelined_requests() {
     let conns = Arc::new(AtomicUsize::new(0));
     let backend = spawn_backend(http_backend("ok", true), conns.clone()).await;
-    let server = start_xflux("thin-l7", &[backend]).await;
+    let server = start_xlb("thin-l7", &[backend]).await;
 
     let mut client = TestClient::connect(server.addr).await;
     client
-        .send(b"GET /1 HTTP/1.1\r\nHost: xflux\r\n\r\nGET /2 HTTP/1.1\r\nHost: xflux\r\n\r\n")
+        .send(b"GET /1 HTTP/1.1\r\nHost: xlb\r\n\r\nGET /2 HTTP/1.1\r\nHost: xlb\r\n\r\n")
         .await;
     let first = client.read_response().await;
     let second = client.read_response().await;
@@ -388,11 +388,11 @@ async fn thin_l7_streams_chunked_response_without_buffering() {
         })
     });
     let backend = spawn_backend(handler, conns.clone()).await;
-    let server = start_xflux("thin-l7", &[backend]).await;
+    let server = start_xlb("thin-l7", &[backend]).await;
 
     let mut client = TcpStream::connect(server.addr).await.unwrap();
     client
-        .write_all(b"POST /v1/chat HTTP/1.1\r\nHost: xflux\r\nContent-Length: 2\r\n\r\n{}")
+        .write_all(b"POST /v1/chat HTTP/1.1\r\nHost: xlb\r\nContent-Length: 2\r\n\r\n{}")
         .await
         .unwrap();
 
@@ -441,11 +441,11 @@ async fn thin_l7_survives_backend_disconnect() {
         })
     });
     let backend = spawn_backend(handler, conns.clone()).await;
-    let server = start_xflux("thin-l7", &[backend]).await;
+    let server = start_xlb("thin-l7", &[backend]).await;
 
     let mut client = TcpStream::connect(server.addr).await.unwrap();
     client
-        .write_all(b"GET / HTTP/1.1\r\nHost: xflux\r\n\r\n")
+        .write_all(b"GET / HTTP/1.1\r\nHost: xlb\r\n\r\n")
         .await
         .unwrap();
     let mut out = Vec::new();
@@ -481,7 +481,7 @@ async fn l4_schedules_least_connections() {
     });
     let slow_addr = spawn_backend(slow, conns.clone()).await;
     let fast_addr = spawn_backend(fast, conns.clone()).await;
-    let server = start_xflux("l4", &[slow_addr, fast_addr]).await;
+    let server = start_xlb("l4", &[slow_addr, fast_addr]).await;
 
     // First connection is pinned to whichever backend leastconn picks first.
     let mut a = TcpStream::connect(server.addr).await.unwrap();
@@ -508,7 +508,7 @@ async fn l4_schedules_least_connections() {
 async fn thin_l7_falls_back_on_http2_preface() {
     let conns = Arc::new(AtomicUsize::new(0));
     let backend = spawn_backend(echo_backend(), conns.clone()).await;
-    let server = start_xflux("thin-l7", &[backend]).await;
+    let server = start_xlb("thin-l7", &[backend]).await;
 
     let mut client = TcpStream::connect(server.addr).await.unwrap();
     let preface = b"PRI * HTTP/2.0\r\n\r\nSM\r\n\r\n";
@@ -524,7 +524,7 @@ async fn thin_l7_falls_back_on_http2_preface() {
 async fn thin_l7_falls_back_on_binary_protocol() {
     let conns = Arc::new(AtomicUsize::new(0));
     let backend = spawn_backend(echo_backend(), conns.clone()).await;
-    let server = start_xflux("thin-l7", &[backend]).await;
+    let server = start_xlb("thin-l7", &[backend]).await;
 
     let mut client = TcpStream::connect(server.addr).await.unwrap();
     // Looks like a TLS record header, definitely not an HTTP method.
@@ -550,12 +550,12 @@ async fn thin_l7_falls_back_on_upgrade() {
         })
     });
     let backend = spawn_backend(handler, conns.clone()).await;
-    let server = start_xflux("thin-l7", &[backend]).await;
+    let server = start_xlb("thin-l7", &[backend]).await;
 
     let mut client = TcpStream::connect(server.addr).await.unwrap();
     client
         .write_all(
-            b"GET /ws HTTP/1.1\r\nHost: xflux\r\nUpgrade: websocket\r\nConnection: Upgrade\r\n\r\n",
+            b"GET /ws HTTP/1.1\r\nHost: xlb\r\nUpgrade: websocket\r\nConnection: Upgrade\r\n\r\n",
         )
         .await
         .unwrap();
@@ -632,7 +632,7 @@ async fn tls_termination_serves_http_and_reuses_backend() {
     let backend = spawn_backend(http_backend("secure", true), conns.clone()).await;
     let cert_path = write_temp_file("cert.pem", CERT_PEM);
     let key_path = write_temp_file("key.pem", KEY_PEM);
-    let server = start_xflux_tls(backend, &cert_path, &key_path).await;
+    let server = start_xlb_tls(backend, &cert_path, &key_path).await;
 
     let _ = rustls::crypto::ring::default_provider().install_default();
     let mut roots = rustls::RootCertStore::empty();
@@ -692,7 +692,7 @@ async fn read_until(stream: &mut TcpStream, needle: &[u8]) -> Vec<u8> {
     }
 }
 
-/// `[DONE]` is payload. xFlux must keep splicing until the HTTP chunked terminator.
+/// `[DONE]` is payload. xLB must keep splicing until the HTTP chunked terminator.
 #[tokio::test]
 async fn thin_l7_treats_sse_done_as_opaque_payload() {
     let conns = Arc::new(AtomicUsize::new(0));
@@ -733,11 +733,11 @@ async fn thin_l7_treats_sse_done_as_opaque_payload() {
         })
     });
     let backend = spawn_backend(handler, conns.clone()).await;
-    let server = start_xflux("thin-l7", &[backend]).await;
+    let server = start_xlb("thin-l7", &[backend]).await;
 
     let mut client = TcpStream::connect(server.addr).await.unwrap();
     client
-        .write_all(b"POST /v1/chat HTTP/1.1\r\nHost: xflux\r\nContent-Length: 2\r\n\r\n{}")
+        .write_all(b"POST /v1/chat HTTP/1.1\r\nHost: xlb\r\nContent-Length: 2\r\n\r\n{}")
         .await
         .unwrap();
     let first = read_until(&mut client, b"0\r\n\r\n").await;
@@ -750,7 +750,7 @@ async fn thin_l7_treats_sse_done_as_opaque_payload() {
     );
 
     client
-        .write_all(b"GET /next HTTP/1.1\r\nHost: xflux\r\n\r\n")
+        .write_all(b"GET /next HTTP/1.1\r\nHost: xlb\r\n\r\n")
         .await
         .unwrap();
     let second = read_until(&mut client, b"ok").await;
@@ -791,13 +791,13 @@ async fn thin_l7_forwards_json_body_and_ignores_it_for_scheduling() {
     };
     let backend_a = spawn_backend(make(a_hits.clone()), Arc::new(AtomicUsize::new(0))).await;
     let backend_b = spawn_backend(make(b_hits.clone()), Arc::new(AtomicUsize::new(0))).await;
-    let server = start_xflux_cfg("thin-l7", &[backend_a, backend_b], "roundrobin", 0).await;
+    let server = start_xlb_cfg("thin-l7", &[backend_a, backend_b], "roundrobin", 0).await;
 
     for model in ["alpha", "beta"] {
         let mut client = TcpStream::connect(server.addr).await.unwrap();
         let json = format!(r#"{{"model":"{model}","stream":true}}"#);
         let req = format!(
-            "POST /v1/chat/completions HTTP/1.1\r\nHost: xflux\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+            "POST /v1/chat/completions HTTP/1.1\r\nHost: xlb\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
             json.len(),
             json
         );
@@ -862,12 +862,12 @@ async fn thin_l7_echoes_request_body_verbatim() {
         })
     });
     let backend = spawn_backend(handler, conns.clone()).await;
-    let server = start_xflux("thin-l7", &[backend]).await;
+    let server = start_xlb("thin-l7", &[backend]).await;
 
     let payload = br#"{"model":"should-not-parse","messages":[{"role":"user","content":"data: [DONE]\n\n"}]}"#;
     let mut client = TcpStream::connect(server.addr).await.unwrap();
     let req = format!(
-        "POST /v1/chat HTTP/1.1\r\nHost: xflux\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+        "POST /v1/chat HTTP/1.1\r\nHost: xlb\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
         payload.len()
     );
     client.write_all(req.as_bytes()).await.unwrap();
@@ -919,11 +919,11 @@ async fn thin_l7_does_not_retry_after_first_response_byte() {
     };
     let a = spawn_backend(dying, Arc::new(AtomicUsize::new(0))).await;
     let b = spawn_backend(healthy, Arc::new(AtomicUsize::new(0))).await;
-    let server = start_xflux_cfg("thin-l7", &[a, b], "roundrobin", 2).await;
+    let server = start_xlb_cfg("thin-l7", &[a, b], "roundrobin", 2).await;
 
     let mut client = TcpStream::connect(server.addr).await.unwrap();
     client
-        .write_all(b"GET / HTTP/1.1\r\nHost: xflux\r\n\r\n")
+        .write_all(b"GET / HTTP/1.1\r\nHost: xlb\r\n\r\n")
         .await
         .unwrap();
     let mut out = Vec::new();
@@ -968,11 +968,11 @@ async fn thin_l7_redispatches_on_connect_failure() {
     let dead = dead_listener.local_addr().unwrap();
     drop(dead_listener);
     let live_addr = spawn_backend(live, Arc::new(AtomicUsize::new(0))).await;
-    let server = start_xflux_cfg("thin-l7", &[dead, live_addr], "leastconn", 2).await;
+    let server = start_xlb_cfg("thin-l7", &[dead, live_addr], "leastconn", 2).await;
 
     let mut client = TcpStream::connect(server.addr).await.unwrap();
     client
-        .write_all(b"GET / HTTP/1.1\r\nHost: xflux\r\n\r\n")
+        .write_all(b"GET / HTTP/1.1\r\nHost: xlb\r\n\r\n")
         .await
         .unwrap();
     let mut out = Vec::new();
@@ -1016,11 +1016,11 @@ async fn thin_l7_forwards_informational_then_final() {
         })
     });
     let backend = spawn_backend(handler, conns.clone()).await;
-    let server = start_xflux("thin-l7", &[backend]).await;
+    let server = start_xlb("thin-l7", &[backend]).await;
 
     let mut client = TcpStream::connect(server.addr).await.unwrap();
     client
-        .write_all(b"POST /upload HTTP/1.1\r\nHost: xflux\r\nContent-Length: 4\r\n\r\nbody")
+        .write_all(b"POST /upload HTTP/1.1\r\nHost: xlb\r\nContent-Length: 4\r\n\r\nbody")
         .await
         .unwrap();
     let first = read_until(&mut client, b"done").await;
@@ -1030,7 +1030,7 @@ async fn thin_l7_forwards_informational_then_final() {
     assert!(text.contains("done"), "{text}");
 
     client
-        .write_all(b"GET /next HTTP/1.1\r\nHost: xflux\r\n\r\n")
+        .write_all(b"GET /next HTTP/1.1\r\nHost: xlb\r\n\r\n")
         .await
         .unwrap();
     let second = read_until(&mut client, b"bye").await;
@@ -1039,13 +1039,13 @@ async fn thin_l7_forwards_informational_then_final() {
     server.stop().await;
 }
 
-async fn start_xflux_with_timeouts(
+async fn start_xlb_with_timeouts(
     mode: &str,
     backend: SocketAddr,
     first_byte: &str,
     idle: &str,
     total: &str,
-) -> XFluxServer {
+) -> XlbServer {
     let text = format!(
         r#"
 [server]
@@ -1073,7 +1073,7 @@ weight = 1
 "#
     );
     let config = Config::from_toml(&text).unwrap();
-    XFluxServer::start(config).await.unwrap()
+    XlbServer::start(config).await.unwrap()
 }
 
 #[tokio::test]
@@ -1088,12 +1088,12 @@ async fn thin_l7_enforces_first_byte_timeout_and_returns_504() {
         })
     });
     let backend = spawn_backend(handler, conns.clone()).await;
-    let server = start_xflux_with_timeouts("thin-l7", backend, "80ms", "50ms", "80ms").await;
+    let server = start_xlb_with_timeouts("thin-l7", backend, "80ms", "50ms", "80ms").await;
 
     let started = Instant::now();
     let mut client = TcpStream::connect(server.addr).await.unwrap();
     client
-        .write_all(b"POST /v1/chat HTTP/1.1\r\nHost: xflux\r\nContent-Length: 2\r\n\r\n{}")
+        .write_all(b"POST /v1/chat HTTP/1.1\r\nHost: xlb\r\nContent-Length: 2\r\n\r\n{}")
         .await
         .unwrap();
     let mut out = Vec::new();
@@ -1132,17 +1132,17 @@ async fn thin_l7_allows_slow_first_byte_then_enforces_tight_chunk_idle() {
             if socket.write_all(&chunk("data: first\n\n")).await.is_err() {
                 return;
             }
-            // Mid-stream stall for 2s (> idle 60ms): xFlux must abort the stream quickly.
+            // Mid-stream stall for 2s (> idle 60ms): xLB must abort the stream quickly.
             tokio::time::sleep(Duration::from_secs(2)).await;
         })
     });
     let backend = spawn_backend(handler, conns.clone()).await;
-    let server = start_xflux_with_timeouts("thin-l7", backend, "500ms", "60ms", "5s").await;
+    let server = start_xlb_with_timeouts("thin-l7", backend, "500ms", "60ms", "5s").await;
 
     let started = Instant::now();
     let mut client = TcpStream::connect(server.addr).await.unwrap();
     client
-        .write_all(b"GET /stream HTTP/1.1\r\nHost: xflux\r\n\r\n")
+        .write_all(b"GET /stream HTTP/1.1\r\nHost: xlb\r\n\r\n")
         .await
         .unwrap();
     let mut out = Vec::new();
@@ -1172,7 +1172,7 @@ async fn l4_enforces_first_byte_timeout_before_backend_responds() {
         })
     });
     let backend = spawn_backend(handler, conns.clone()).await;
-    let server = start_xflux_with_timeouts("l4", backend, "60ms", "2s", "5s").await;
+    let server = start_xlb_with_timeouts("l4", backend, "60ms", "2s", "5s").await;
 
     let started = Instant::now();
     let mut client = TcpStream::connect(server.addr).await.unwrap();
@@ -1232,13 +1232,13 @@ addr = "{backend}"
 weight = 1
 "#
     );
-    let server = XFluxServer::start(Config::from_toml(&text).unwrap())
+    let server = XlbServer::start(Config::from_toml(&text).unwrap())
         .await
         .unwrap();
 
     let send_one = |addr: SocketAddr| async move {
         let mut client = TestClient::connect(addr).await;
-        client.send(b"GET / HTTP/1.1\r\nHost: xflux\r\n\r\n").await;
+        client.send(b"GET / HTTP/1.1\r\nHost: xlb\r\n\r\n").await;
         client.read_response().await
     };
 
@@ -1296,20 +1296,20 @@ addr = "{backend}"
 weight = 1
 "#
     );
-    let server = XFluxServer::start(Config::from_toml(&text).unwrap())
+    let server = XlbServer::start(Config::from_toml(&text).unwrap())
         .await
         .unwrap();
 
     let mut first = TcpStream::connect(server.addr).await.unwrap();
     first
-        .write_all(b"GET /slow HTTP/1.1\r\nHost: xflux\r\nConnection: close\r\n\r\n")
+        .write_all(b"GET /slow HTTP/1.1\r\nHost: xlb\r\nConnection: close\r\n\r\n")
         .await
         .unwrap();
     tokio::time::sleep(Duration::from_millis(20)).await;
 
     let mut second = TcpStream::connect(server.addr).await.unwrap();
     second
-        .write_all(b"GET /overflow HTTP/1.1\r\nHost: xflux\r\nConnection: close\r\n\r\n")
+        .write_all(b"GET /overflow HTTP/1.1\r\nHost: xlb\r\nConnection: close\r\n\r\n")
         .await
         .unwrap();
     let mut second_out = Vec::new();
@@ -1374,11 +1374,11 @@ async fn thin_l7_recovers_from_stale_pooled_keepalive_close() {
         })
     };
     let backend = spawn_backend(handler, conns.clone()).await;
-    let server = start_xflux("thin-l7", &[backend]).await;
+    let server = start_xlb("thin-l7", &[backend]).await;
 
     let mut client = TestClient::connect(server.addr).await;
     client
-        .send(b"POST /v1/chat HTTP/1.1\r\nHost: xflux\r\nContent-Length: 2\r\n\r\n{}")
+        .send(b"POST /v1/chat HTTP/1.1\r\nHost: xlb\r\nContent-Length: 2\r\n\r\n{}")
         .await;
     let r1 = client.read_response().await;
     assert!(r1.ends_with("first"), "{r1}");
@@ -1386,7 +1386,7 @@ async fn thin_l7_recovers_from_stale_pooled_keepalive_close() {
     // Second request checks out the pooled socket, hits the simulated keep-alive
     // close race, and must transparently redial a fresh backend socket.
     client
-        .send(b"POST /v1/chat HTTP/1.1\r\nHost: xflux\r\nContent-Length: 2\r\n\r\n{}")
+        .send(b"POST /v1/chat HTTP/1.1\r\nHost: xlb\r\nContent-Length: 2\r\n\r\n{}")
         .await;
     let r2 = client.read_response().await;
     assert!(r2.ends_with("second"), "{r2}");
@@ -1458,7 +1458,7 @@ weight = 1
 max_retries = 1
 "#
     );
-    let server = XFluxServer::start(Config::from_toml(&text).unwrap())
+    let server = XlbServer::start(Config::from_toml(&text).unwrap())
         .await
         .unwrap();
 
@@ -1466,7 +1466,7 @@ max_retries = 1
     // succeeds on `live_addr`. Subsequent requests go straight to `live_addr`.
     let mut client = TestClient::connect(server.addr).await;
     for _ in 0..3 {
-        client.send(b"GET / HTTP/1.1\r\nHost: xflux\r\n\r\n").await;
+        client.send(b"GET / HTTP/1.1\r\nHost: xlb\r\n\r\n").await;
         let resp = client.read_response().await;
         assert!(resp.contains("200 OK"), "{resp}");
     }
