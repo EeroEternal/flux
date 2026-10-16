@@ -10,12 +10,25 @@ Write bullets that a human can ship from: **what changed**, **who it affects**,
 
 ## [Unreleased]
 
+## [0.0.3] - 2026-10-16
+
+### Added
+
+- **MIT `LICENSE`, vector topology diagram & observability guide**: added root
+  [`LICENSE`](../LICENSE), SVG architecture diagram
+  ([`docs/assets/architecture.svg`](assets/architecture.svg)), and dedicated
+  observability/verification reference
+  ([`docs/observability.md`](observability.md)), while streamlining
+  [`README.md`](../README.md) with HAProxy comparison and minimal quick-start
+  configuration. Breaking: No.
+
 ### Changed
 
 - **Renamed project to xLB (`xlb`)**: crate, binary (`xlb`), server type
   (`XlbServer`), health probe `User-Agent` (`xlb-health`), JSON log env var
   (`XLB_LOG_JSON`), default log filter (`xlb=info`), and all Prometheus metric
-  names (`xlb_*`) are unified under the `xlb` namespace. Breaking: Yes
+  names (`xlb_*`) are unified under the `xlb` namespace, with all documentation
+  and agent specifications translated to English. Breaking: Yes
   (replaces `xflux` / `XFLUX_LOG_JSON` / `xflux_*`).
 
 ## [0.0.2] - 2026-10-16
