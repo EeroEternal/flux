@@ -169,6 +169,7 @@ async fn accept_loop(
                         if state.config.server.tcp_nodelay {
                             let _ = stream.set_nodelay(true);
                         }
+                        crate::pool::configure_tcp_keepalive(&stream);
                         let permit = match semaphore.clone().try_acquire_owned() {
                             Ok(permit) => permit,
                             Err(_) => {

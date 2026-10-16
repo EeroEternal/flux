@@ -9,6 +9,7 @@
 //! Idle timeout is independent from stream duration: a connection that is
 //! checked out for a 10 minute stream is never considered idle.
 
+use socket2::{SockRef, TcpKeepalive};
 use std::collections::VecDeque;
 use std::io;
 use std::net::SocketAddr;
@@ -16,6 +17,16 @@ use std::sync::Mutex;
 use std::time::{Duration, Instant};
 use tokio::net::TcpStream;
 use tokio::time::timeout;
+
+/// Enable OS-level TCP keepalive on a stream so NAT gateways, cloud load
+/// balancers, and firewalls do not silently drop long-context prefill or
+/// reasoning streams during prolonged application-layer silence.
+pub(crate) fn configure_tcp_keepalive(stream: &TcpStream) {
+    let keepalive = TcpKeepalive::new()
+        .with_time(Duration::from_secs(30))
+        .with_interval(Duration::from_secs(10));
+    let _ = SockRef::from(stream).set_tcp_keepalive(&keepalive);
+}
 
 struct Idle {
     stream: TcpStream,
@@ -91,6 +102,7 @@ impl ConnPool {
             .await
             .map_err(|_| io::Error::new(io::ErrorKind::TimedOut, "backend connect timeout"))??;
         stream.set_nodelay(true)?;
+        configure_tcp_keepalive(&stream);
         Ok(stream)
     }
 
