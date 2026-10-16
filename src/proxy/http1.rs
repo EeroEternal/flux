@@ -10,7 +10,7 @@
 use super::{read_with_idle, write_all_with_idle};
 use std::io;
 use std::time::{Duration, Instant};
-use tokio::io::{AsyncRead, AsyncWrite};
+use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite};
 
 /// Find the end of a header block (the position just past `\r\n\r\n`).
 pub fn find_headers_end(buf: &[u8]) -> Option<usize> {
@@ -116,6 +116,98 @@ pub async fn read_head<R: AsyncRead + Unpin>(
             };
         }
         cb.push(&tmp[..n]);
+    }
+}
+
+/// Read a response head from `backend` while simultaneously watching `client`
+/// for premature disconnect (EOF/RST) when `client_buf` has no pipelined bytes.
+///
+/// During long-context prefill or reasoning silent phases (tens of seconds with
+/// 0 upstream bytes), this ensures a client abort immediately tears down the
+/// backend connection instead of waiting for the next token or `first_byte`
+/// timeout. Any pipelined bytes that arrive from the client are preserved in
+/// `client_buf`.
+pub async fn read_response_head_or_client_abort<R, C>(
+    backend: &mut R,
+    cb: &mut ConnBuffer,
+    client: &mut C,
+    client_buf: &mut ConnBuffer,
+    max_head_bytes: usize,
+    idle: Duration,
+    deadline: Instant,
+) -> io::Result<Option<Vec<u8>>>
+where
+    R: AsyncRead + Unpin,
+    C: AsyncRead + Unpin,
+{
+    loop {
+        if let Some(end) = find_headers_end(cb.available()) {
+            let head = cb.available()[..end].to_vec();
+            cb.consume(end);
+            return Ok(Some(head));
+        }
+        if cb.available().len() > max_head_bytes {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "message head too large",
+            ));
+        }
+        let mut tmp = [0u8; 8192];
+        let n = read_backend_or_client_eof(backend, &mut tmp, client, client_buf, idle, deadline)
+            .await?;
+        if n == 0 {
+            return if cb.is_empty() {
+                Ok(None)
+            } else {
+                Err(io::Error::new(
+                    io::ErrorKind::UnexpectedEof,
+                    "eof in message head",
+                ))
+            };
+        }
+        cb.push(&tmp[..n]);
+    }
+}
+
+async fn read_backend_or_client_eof<R, C>(
+    backend: &mut R,
+    buf: &mut [u8],
+    client: &mut C,
+    client_buf: &mut ConnBuffer,
+    idle: Duration,
+    deadline: Instant,
+) -> io::Result<usize>
+where
+    R: AsyncRead + Unpin,
+    C: AsyncRead + Unpin,
+{
+    // If the client already sent pipelined bytes for a subsequent request, avoid
+    // reading more from the client until that pipelined request is processed.
+    if !client_buf.is_empty() {
+        return read_with_idle(backend, buf, idle, deadline).await;
+    }
+    let step_deadline = (Instant::now() + idle).min(deadline);
+    let mut client_probe = [0u8; 1024];
+    tokio::select! {
+        biased;
+        res = read_with_idle(backend, buf, idle, deadline) => res,
+        client_res = client.read(&mut client_probe) => {
+            match client_res {
+                Ok(0) => Err(io::Error::new(
+                    io::ErrorKind::ConnectionAborted,
+                    "client closed connection while waiting for backend stream",
+                )),
+                Ok(n) => {
+                    client_buf.push(&client_probe[..n]);
+                    let rem_idle = step_deadline.saturating_duration_since(Instant::now());
+                    read_with_idle(backend, buf, rem_idle, deadline).await
+                }
+                Err(e) => Err(io::Error::new(
+                    io::ErrorKind::ConnectionAborted,
+                    format!("client connection error during stream: {e}"),
+                )),
+            }
+        }
     }
 }
 
@@ -415,7 +507,14 @@ where
                 cb.consume(take);
                 remaining -= take as u64;
             }
-            let mut buf = vec![0u8; 16 * 1024];
+            // Use a 64 KiB read window for large long-context bodies (> 64 KiB)
+            // to cut syscall churn by 4x while staying strictly bounded.
+            let chunk_cap = if remaining > 64 * 1024 {
+                64 * 1024
+            } else {
+                16 * 1024
+            };
+            let mut buf = vec![0u8; chunk_cap];
             while remaining > 0 {
                 let n = read_with_idle(src, &mut buf, idle, deadline).await?;
                 if n == 0 {
@@ -426,6 +525,9 @@ where
                 }
                 let take = n.min(remaining as usize);
                 write_all_with_idle(dst, &buf[..take], idle, deadline).await?;
+                if take < n {
+                    cb.push(&buf[take..n]);
+                }
                 remaining -= take as u64;
             }
             Ok(())
@@ -468,6 +570,107 @@ where
                     return Ok(());
                 }
                 cb.push(&buf[..n]);
+            }
+        }
+    }
+}
+
+/// Stream a response body from `backend` to `client` while simultaneously
+/// watching `client` for premature disconnect during silent reasoning pauses.
+pub async fn forward_response_body_or_client_abort<R, C>(
+    backend: &mut R,
+    client: &mut C,
+    response_buf: &mut ConnBuffer,
+    client_buf: &mut ConnBuffer,
+    kind: BodyKind,
+    idle: Duration,
+    deadline: Instant,
+) -> io::Result<()>
+where
+    R: AsyncRead + Unpin,
+    C: AsyncRead + AsyncWrite + Unpin,
+{
+    match kind {
+        BodyKind::None => Ok(()),
+        BodyKind::Length(mut remaining) => {
+            let buffered = response_buf.available();
+            let take = buffered.len().min(remaining as usize);
+            if take > 0 {
+                let chunk = buffered[..take].to_vec();
+                write_all_with_idle(client, &chunk, idle, deadline).await?;
+                response_buf.consume(take);
+                remaining -= take as u64;
+            }
+            let chunk_cap = if remaining > 64 * 1024 {
+                64 * 1024
+            } else {
+                16 * 1024
+            };
+            let mut buf = vec![0u8; chunk_cap];
+            while remaining > 0 {
+                let n = read_backend_or_client_eof(
+                    backend, &mut buf, client, client_buf, idle, deadline,
+                )
+                .await?;
+                if n == 0 {
+                    return Err(io::Error::new(
+                        io::ErrorKind::UnexpectedEof,
+                        "eof in fixed-length body",
+                    ));
+                }
+                let take = n.min(remaining as usize);
+                write_all_with_idle(client, &buf[..take], idle, deadline).await?;
+                if take < n {
+                    response_buf.push(&buf[take..n]);
+                }
+                remaining -= take as u64;
+            }
+            Ok(())
+        }
+        BodyKind::Chunked => {
+            let mut scanner = ChunkScanner::new();
+            let mut buf = vec![0u8; 16 * 1024];
+            loop {
+                let buffered = response_buf.available();
+                if !buffered.is_empty() {
+                    let consumed = scanner.consume(buffered);
+                    let chunk = buffered[..consumed].to_vec();
+                    write_all_with_idle(client, &chunk, idle, deadline).await?;
+                    response_buf.consume(consumed);
+                }
+                if scanner.is_done() {
+                    return Ok(());
+                }
+                let n = read_backend_or_client_eof(
+                    backend, &mut buf, client, client_buf, idle, deadline,
+                )
+                .await?;
+                if n == 0 {
+                    return Err(io::Error::new(
+                        io::ErrorKind::UnexpectedEof,
+                        "eof in chunked body",
+                    ));
+                }
+                response_buf.push(&buf[..n]);
+            }
+        }
+        BodyKind::UntilClose => {
+            let mut buf = vec![0u8; 16 * 1024];
+            loop {
+                let buffered = response_buf.available();
+                if !buffered.is_empty() {
+                    let chunk = buffered.to_vec();
+                    write_all_with_idle(client, &chunk, idle, deadline).await?;
+                    response_buf.consume(chunk.len());
+                }
+                let n = read_backend_or_client_eof(
+                    backend, &mut buf, client, client_buf, idle, deadline,
+                )
+                .await?;
+                if n == 0 {
+                    return Ok(());
+                }
+                response_buf.push(&buf[..n]);
             }
         }
     }

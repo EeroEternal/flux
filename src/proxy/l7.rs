@@ -180,6 +180,7 @@ where
                 &mut client,
                 &mut conn,
                 &mut response_buf,
+                &mut client_buf,
                 &request,
                 max_head,
                 timeouts,
@@ -206,6 +207,7 @@ where
                                         &mut client,
                                         &mut conn,
                                         &mut response_buf,
+                                        &mut client_buf,
                                         &request,
                                         max_head,
                                         timeouts,
@@ -283,6 +285,7 @@ where
                 &mut client,
                 &mut conn,
                 &mut response_buf,
+                &mut client_buf,
                 &request,
                 max_head,
                 timeouts,
@@ -318,7 +321,11 @@ where
                 }
             }
             Err(e) => {
-                backend.record_upstream_error();
+                if e.kind() == io::ErrorKind::ConnectionAborted {
+                    state.metrics.client_errors_total.inc();
+                } else {
+                    backend.record_upstream_error();
+                }
                 if e.kind() == io::ErrorKind::TimedOut {
                     state.metrics.rejected("timeout");
                     if !wrote_to_client {
@@ -358,7 +365,6 @@ fn is_stale_reuse_error(e: &io::Error) -> bool {
         io::ErrorKind::UnexpectedEof
             | io::ErrorKind::ConnectionReset
             | io::ErrorKind::BrokenPipe
-            | io::ErrorKind::ConnectionAborted
             | io::ErrorKind::NotConnected
     )
 }
@@ -407,6 +413,7 @@ async fn forward_response<S>(
     client: &mut S,
     conn: &mut TcpStream,
     response_buf: &mut ConnBuffer,
+    client_buf: &mut ConnBuffer,
     request: &RequestHead,
     max_head: usize,
     timeouts: &crate::config::TimeoutConfig,
@@ -428,14 +435,22 @@ where
         } else {
             idle
         };
-        let head = http1::read_head(conn, response_buf, max_head, head_budget, deadline)
-            .await?
-            .ok_or_else(|| {
-                io::Error::new(
-                    io::ErrorKind::UnexpectedEof,
-                    "backend closed before sending a final response",
-                )
-            })?;
+        let head = http1::read_response_head_or_client_abort(
+            conn,
+            response_buf,
+            client,
+            client_buf,
+            max_head,
+            head_budget,
+            deadline,
+        )
+        .await?
+        .ok_or_else(|| {
+            io::Error::new(
+                io::ErrorKind::UnexpectedEof,
+                "backend closed before sending a final response",
+            )
+        })?;
         let is_first_head = backend_first_byte.is_none();
         if is_first_head {
             backend_first_byte = Some(Instant::now());
@@ -473,7 +488,16 @@ where
     } else {
         response.body
     };
-    http1::forward_body(conn, client, response_buf, body, idle, deadline).await?;
+    http1::forward_response_body_or_client_abort(
+        conn,
+        client,
+        response_buf,
+        client_buf,
+        body,
+        idle,
+        deadline,
+    )
+    .await?;
 
     let self_delimiting = !matches!(body, BodyKind::UntilClose);
     Ok(ResponseOutcome {

@@ -1473,3 +1473,143 @@ max_retries = 1
     assert_eq!(live_hits.load(Ordering::SeqCst), 3);
     server.stop().await;
 }
+
+#[tokio::test]
+async fn thin_l7_propagates_client_abort_during_silent_prefill_and_stream_pause() {
+    let conns = Arc::new(AtomicUsize::new(0));
+    let (closed_tx, mut closed_rx) = tokio::sync::mpsc::unbounded_channel::<usize>();
+    let req_seq = Arc::new(AtomicUsize::new(0));
+    let handler: Handler = {
+        let req_seq = req_seq.clone();
+        Arc::new(move |mut socket| {
+            let closed_tx = closed_tx.clone();
+            let seq = req_seq.fetch_add(1, Ordering::SeqCst);
+            Box::pin(async move {
+                let mut buf = Vec::new();
+                let Some(head) = read_http_head(&mut socket, &mut buf).await else {
+                    return;
+                };
+                drain_fixed_body(&mut socket, &mut buf, &head).await;
+                if seq == 0 {
+                    // Phase 1: simulate a long-context prefill silence (no response head yet).
+                    // Wait until xLB closes the backend socket when the client aborts.
+                    let mut probe = [0u8; 16];
+                    let _ = socket.read(&mut probe).await;
+                    let _ = closed_tx.send(0);
+                } else {
+                    // Phase 2: send response head + first SSE chunk, then pause silently
+                    // (simulating a reasoning pause mid-stream).
+                    let _ = socket
+                        .write_all(
+                            b"HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nTransfer-Encoding: chunked\r\n\r\n6\r\ndata:1\r\n",
+                        )
+                        .await;
+                    let mut probe = [0u8; 16];
+                    let _ = socket.read(&mut probe).await;
+                    let _ = closed_tx.send(1);
+                }
+            })
+        })
+    };
+    let backend = spawn_backend(handler, conns.clone()).await;
+    let server = start_xlb("thin-l7", &[backend]).await;
+
+    // 1. Client aborts during silent prefill (before first response byte).
+    let mut client1 = TcpStream::connect(server.addr).await.unwrap();
+    client1
+        .write_all(
+            b"POST /v1/chat/completions HTTP/1.1\r\nHost: xlb\r\nContent-Length: 2\r\n\r\n{}",
+        )
+        .await
+        .unwrap();
+    tokio::time::sleep(Duration::from_millis(40)).await;
+    drop(client1);
+
+    let which = tokio::time::timeout(Duration::from_millis(500), closed_rx.recv())
+        .await
+        .expect("backend socket must close immediately when client aborts during prefill")
+        .unwrap();
+    assert_eq!(which, 0);
+
+    // 2. Client aborts mid-stream during a silent reasoning pause.
+    let mut client2 = TcpStream::connect(server.addr).await.unwrap();
+    client2
+        .write_all(
+            b"POST /v1/chat/completions HTTP/1.1\r\nHost: xlb\r\nContent-Length: 2\r\n\r\n{}",
+        )
+        .await
+        .unwrap();
+    let mut first_bytes = [0u8; 64];
+    let n = client2.read(&mut first_bytes).await.unwrap();
+    assert!(n > 0);
+    drop(client2);
+
+    let which2 = tokio::time::timeout(Duration::from_millis(500), closed_rx.recv())
+        .await
+        .expect("backend socket must close immediately when client aborts mid-stream")
+        .unwrap();
+    assert_eq!(which2, 1);
+    assert_eq!(conns.load(Ordering::SeqCst), 2);
+
+    server.stop().await;
+}
+
+#[tokio::test]
+async fn thin_l7_streams_large_context_request_body_verbatim() {
+    let conns = Arc::new(AtomicUsize::new(0));
+    let received_len = Arc::new(AtomicUsize::new(0));
+    let handler: Handler = {
+        let received_len = received_len.clone();
+        Arc::new(move |mut socket| {
+            let received_len = received_len.clone();
+            Box::pin(async move {
+                let mut buf = Vec::new();
+                while let Some(head) = read_http_head(&mut socket, &mut buf).await {
+                    let head_text = String::from_utf8_lossy(&head);
+                    let len: usize = head_text
+                        .lines()
+                        .find_map(|l| {
+                            let (k, v) = l.split_once(':')?;
+                            k.eq_ignore_ascii_case("content-length")
+                                .then(|| v.trim().parse().ok())
+                                .flatten()
+                        })
+                        .unwrap_or(0);
+                    while buf.len() < len {
+                        let mut tmp = vec![0u8; 32 * 1024];
+                        match socket.read(&mut tmp).await {
+                            Ok(0) | Err(_) => return,
+                            Ok(n) => buf.extend_from_slice(&tmp[..n]),
+                        }
+                    }
+                    assert!(buf[..len].iter().all(|&b| b == b'x'));
+                    buf.drain(..len);
+                    received_len.store(len, Ordering::SeqCst);
+                    let resp = format!(
+                        "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: keep-alive\r\n\r\n{}",
+                        len,
+                        "y".repeat(len)
+                    );
+                    if socket.write_all(resp.as_bytes()).await.is_err() {
+                        return;
+                    }
+                }
+            })
+        })
+    };
+    let backend = spawn_backend(handler, conns.clone()).await;
+    let server = start_xlb("thin-l7", &[backend]).await;
+
+    // 256 KiB payload exercises the 64 KiB long-context streaming window and pool reuse.
+    let body_size = 256 * 1024;
+    let payload = "x".repeat(body_size);
+    let mut client = TestClient::connect(server.addr).await;
+    let req = format!(
+        "POST /v1/chat/completions HTTP/1.1\r\nHost: xlb\r\nContent-Length: {body_size}\r\n\r\n{payload}"
+    );
+    client.send(req.as_bytes()).await;
+    let resp = client.read_response().await;
+    assert!(resp.starts_with("HTTP/1.1 200 OK"));
+    assert_eq!(received_len.load(Ordering::SeqCst), body_size);
+    server.stop().await;
+}

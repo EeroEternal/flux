@@ -10,6 +10,27 @@ Write bullets that a human can ship from: **what changed**, **who it affects**,
 
 ## [Unreleased]
 
+### Added
+
+- **Immediate client-abort propagation during silent prefill & reasoning pauses (`thin-l7`)**:
+  while waiting for backend response headers or between chunked SSE writes, xLB
+  now races backend reads against client EOF/RST (`src/proxy/http1.rs`,
+  `src/proxy/l7.rs`). When a client disconnects mid-prefill or mid-reasoning,
+  xLB immediately closes the backend socket and increments
+  `xlb_client_errors_total` (rather than `xlb_upstream_errors_total`) so
+  downstream gateways and GPU workers can cancel generation without waiting for
+  the next token or timeout. Breaking: No.
+- **OS-level `TCP_KEEPALIVE` on client and backend sockets**: accepted client
+  connections and freshly dialed backend connections now enable `TCP_KEEPALIVE`
+  (`time = 30s`, `interval = 10s`) via `socket2` (`src/pool.rs`,
+  `src/server.rs`), preventing intermediate NAT gateways and firewalls from
+  silently dropping long-context prefill or multi-minute reasoning streams.
+  Breaking: No.
+- **Adaptive 64 KiB read window for large fixed-length bodies**: `forward_body`
+  uses a 64 KiB bounded read buffer when streaming `Content-Length > 64 KiB`
+  bodies (`src/proxy/http1.rs`), reducing syscall churn by 4× on multi-megabyte
+  long-context prompts while preserving strict zero-buffering. Breaking: No.
+
 ## [0.0.4] - 2026-10-16
 
 ### Added
