@@ -1,6 +1,6 @@
 # xLB
 
-**xLB** is a streaming-first load balancer for AI gateways ([LiteLLM](https://github.com/BerriAI/litellm), [New API](https://github.com/Calcium-Ion/new-api), [AISIX](https://github.com/aisix-team/aisix)) and inference clusters. It occupies the HAProxy role in the AI stack: **it forwards bytes, not tokens**, keeping added TTFT near zero while pooling backend connections across long-lived streaming `POST`s.
+**xLB** is a streaming-first load balancer for AI gateways ([xlite](https://github.com/EeroEternal/xlite), [LiteLLM](https://github.com/BerriAI/litellm), [New API](https://github.com/Calcium-Ion/new-api), [AISIX](https://github.com/aisix-team/aisix)) and inference clusters. It occupies the HAProxy role in the AI stack: **it forwards bytes, not tokens**, keeping added TTFT near zero while pooling backend connections across long-lived streaming `POST`s.
 
 <p align="center">
   <img src="docs/assets/architecture.svg" alt="xLB Architecture Topology" width="100%">
@@ -16,6 +16,10 @@ However, traditional load balancers and Ingress controllers were designed around
 - **Timeouts and retries shaped for LLM inference** — LLM workloads have distinct phases: *dial (`connect`) → prefill wait (`first_byte`) → reasoning pauses (`idle`) → multi-minute generation (`total`)*. xLB enforces this layered timeout hierarchy natively and guarantees connection retries and HTTP status reroutes (`402`/`404`/`429`/`5xx`) happen **only before the first response byte** flows to the client.
 - **Built-in TTFT attribution & zero-buffering** — General L7 proxies (Nginx, Envoy) often buffer bodies unless explicitly disabled per route. xLB streams response bodies in fixed 16 KiB chunks with zero aggregation and natively tracks `xlb_ttft_delta_ms` (the exact first-byte latency added by the proxy itself).
 - **Decoupled from gateway lifecycles & model catalogs** — Keeps TLS termination, connection pooling, `/health` hysteresis, and pre-first-byte HTTP status rerouting out of the gateway process so LiteLLM, `xlite`, New API, or AISIX instances can scale, restart, or serve disjoint model subsets without dropping active streams or sharing a model catalog.
+
+<p align="center">
+  <img src="docs/assets/scenarios.svg" alt="xLB Core Feature Scenarios" width="100%">
+</p>
 
 ## Forwarding Modes
 
