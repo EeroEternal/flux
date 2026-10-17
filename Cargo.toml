@@ -1,6 +1,6 @@
 [package]
 name = "xlb"
-version = "0.0.5"
+version = "0.0.6"
 edition = "2021"
 description = "xLB: a streaming-first AI load balancer"
 license = "MIT"

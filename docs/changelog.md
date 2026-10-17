@@ -10,6 +10,37 @@ Write bullets that a human can ship from: **what changed**, **who it affects**,
 
 ## [Unreleased]
 
+## [0.0.6] - 2026-10-17
+
+### Fixed
+
+- **Backend connection pool reuse when clients send `Connection: close` (`thin-l7`)**:
+  non-upgrade HTTP/1.1 requests carrying `Connection: close` now have the
+  `close` token rewritten to `keep-alive` on the backend leg (preserving any
+  additional connection tokens and scanning all `Connection` /
+  `Transfer-Encoding` header lines) while still closing the downstream client
+  connection after the response completes (`src/proxy/http1.rs`,
+  `src/proxy/l7.rs`). Short-lived HTTP/1.1 callers (`curl`, serverless
+  functions, one-shot SDK clients) now achieve full backend connection pool
+  reuse instead of forcing a new backend TCP handshake per request.
+  Breaking: No.
+- **Cross-backend failover when a warm pooled backend crashes pre-first-byte (`thin-l7`)**:
+  when a warm pooled connection (`reused = true`) fails on request write or
+  returns an immediate 0-byte EOF/RST before any response byte and same-backend
+  `acquire_fresh` redial also fails because the backend crashed, `thin-l7`
+  immediately releases the dead backend's lease/concurrency permit and fails
+  over across healthy backend replicas within the `retry.max_retries` budget
+  (`src/proxy/l4.rs`, `src/proxy/l7.rs`). Breaking: No.
+
+### Changed
+
+- **Zero-allocation chunked body streaming and vectored inline request writes (`thin-l7`)**:
+  eliminated per-chunk heap allocations in `ChunkScanner::consume`,
+  `forward_body`, and `forward_response_body_or_client_abort`
+  (`src/proxy/http1.rs`), and added `write_vectored_all_with_idle` (`writev`) so
+  HTTP request headers and inline bodies are coalesced into a single syscall on
+  `TCP_NODELAY` sockets (`src/proxy/mod.rs`, `src/proxy/l7.rs`). Breaking: No.
+
 ## [0.0.5] - 2026-10-16
 
 ### Added
