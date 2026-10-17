@@ -756,17 +756,21 @@ where
     }
 }
 
-/// Drain and discard a backend response body so the backend socket reaches a
-/// clean HTTP/1.1 message boundary and can be returned to the idle pool.
-pub async fn drain_response_body<R>(
+/// Drain and discard a backend response body while watching for client abort
+/// or timeout so the backend socket reaches a clean HTTP/1.1 message boundary
+/// and can be returned to the idle pool.
+pub async fn drain_response_body_or_client_abort<R, C>(
     backend: &mut R,
+    client: &mut C,
     response_buf: &mut ConnBuffer,
+    client_buf: &mut ConnBuffer,
     kind: BodyKind,
     idle: Duration,
     deadline: Instant,
 ) -> io::Result<()>
 where
     R: AsyncRead + Unpin,
+    C: AsyncRead + Unpin,
 {
     match kind {
         BodyKind::None => Ok(()),
@@ -778,7 +782,10 @@ where
             }
             let mut buf = [0u8; 16 * 1024];
             while remaining > 0 {
-                let n = read_with_idle(backend, &mut buf, idle, deadline).await?;
+                let n = read_backend_or_client_eof(
+                    backend, &mut buf, client, client_buf, idle, deadline,
+                )
+                .await?;
                 if n == 0 {
                     return Err(io::Error::new(
                         io::ErrorKind::UnexpectedEof,
@@ -811,7 +818,10 @@ where
                 if scanner.is_done() {
                     return Ok(());
                 }
-                let n = read_with_idle(backend, &mut buf, idle, deadline).await?;
+                let n = read_backend_or_client_eof(
+                    backend, &mut buf, client, client_buf, idle, deadline,
+                )
+                .await?;
                 if n == 0 {
                     return Err(io::Error::new(
                         io::ErrorKind::UnexpectedEof,

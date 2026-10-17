@@ -106,30 +106,23 @@ where
         let client_keep_alive = request.keep_alive;
         let backend_head = http1::rewrite_request_for_backend_pool(&head, &mut request);
 
-        let tagged = match super::l4::connect_tagged(&state).await {
-            Ok(tagged) => tagged,
-            Err(e) => {
-                tracing::debug!(%peer, error = %e, "no backend available");
-                write_error(&mut client, 503, idle).await;
-                break;
-            }
-        };
-        let mut backend = tagged.lease.backend().clone();
-        let mut lease = Some(tagged.lease);
-        let mut conn = tagged.conn;
-        let mut reused = tagged.reused;
-        let mut failed_backends = tagged.failed_backends;
-        let mut retries_used = tagged.retries_used;
-
         // Buffer fixed-length request bodies up to `retry.max_body_bytes`
-        // (64 MiB by default, matching `xlite`) whenever connection reuse or
-        // cross-backend retry/rerouting is active, so stale keep-alive sockets
-        // or retryable HTTP status codes (e.g. 404 model-not-found on an
-        // asymmetric node, 402, 429, 5xx) can be replayed onto another healthy
-        // backend before any response byte is sent.
+        // (64 MiB by default, matching `xlite`) BEFORE checking out a backend
+        // connection whenever connection pooling or cross-backend retry/rerouting
+        // is active:
+        // 1. Client disconnects while uploading the request body never waste or
+        //    pollute a healthy pooled backend socket.
+        // 2. Stale keep-alive sockets or retryable HTTP status codes (e.g. 404
+        //    model-not-found on an asymmetric node, 402, 429, 5xx) can replay
+        //    the request onto another healthy backend before any response byte
+        //    is sent to the client.
+        // 3. As soon as final response headers are written to the client,
+        //    `inline_body` is dropped immediately so long-lived SSE streams hold
+        //    zero request buffer memory during token generation.
         let max_retries = state.config.effective_max_retries();
         let max_body_bytes = state.config.retry.max_body_bytes as u64;
-        let inline_body: Option<Vec<u8>> = if reused || max_retries > 0 {
+        let can_replay_body = max_retries > 0 || state.config.pool.max_idle_per_backend > 0;
+        let mut inline_body: Option<Vec<u8>> = if can_replay_body {
             match request.body {
                 BodyKind::None => Some(Vec::new()),
                 BodyKind::Length(n) if n <= max_body_bytes => {
@@ -161,10 +154,28 @@ where
             None
         };
 
+        let tagged = match super::l4::connect_tagged(&state).await {
+            Ok(tagged) => tagged,
+            Err(e) => {
+                tracing::debug!(%peer, error = %e, "no backend available");
+                write_error(&mut client, 503, idle).await;
+                break;
+            }
+        };
+        let mut backend = tagged.lease.backend().clone();
+        let mut lease = Some(tagged.lease);
+        let mut conn = tagged.conn;
+        let mut reused = tagged.reused;
+        let mut failed_backends = tagged.failed_backends;
+        let mut retries_used = tagged.retries_used;
+
         let mut response_buf = ConnBuffer::new();
         let mut wrote_to_client = false;
-        let resp_result = if let Some(ref body_bytes) = inline_body {
+        let resp_result = if inline_body.is_some() {
             loop {
+                let body_bytes = inline_body
+                    .as_deref()
+                    .expect("inline_body remains buffered until response headers are written");
                 if let Err(e) =
                     send_inline_request(&mut conn, &backend_head, body_bytes, idle, deadline).await
                 {
@@ -223,6 +234,7 @@ where
                     &state.metrics,
                     &mut wrote_to_client,
                     reroute_statuses,
+                    &mut inline_body,
                 )
                 .await;
 
@@ -368,6 +380,7 @@ where
                 &state.metrics,
                 &mut wrote_to_client,
                 None,
+                &mut inline_body,
             )
             .await
         };
@@ -540,6 +553,7 @@ async fn forward_response<S>(
     metrics: &Metrics,
     wrote_to_client: &mut bool,
     reroute_statuses: Option<&[u16]>,
+    inline_body: &mut Option<Vec<u8>>,
 ) -> io::Result<ResponseOutcome>
 where
     S: AsyncRead + AsyncWrite + Unpin,
@@ -586,9 +600,28 @@ where
             } else {
                 parsed.body
             };
-            let drained = http1::drain_response_body(conn, response_buf, body, idle, deadline)
-                .await
-                .is_ok();
+            let drained = match http1::drain_response_body_or_client_abort(
+                conn,
+                client,
+                response_buf,
+                client_buf,
+                body,
+                idle,
+                deadline,
+            )
+            .await
+            {
+                Ok(()) => true,
+                Err(e)
+                    if matches!(
+                        e.kind(),
+                        io::ErrorKind::TimedOut | io::ErrorKind::ConnectionAborted
+                    ) =>
+                {
+                    return Err(e);
+                }
+                Err(_) => false,
+            };
             let self_delimiting = !matches!(body, BodyKind::UntilClose);
             return Ok(ResponseOutcome {
                 reusable: drained
@@ -624,6 +657,10 @@ where
         response = parsed;
         break;
     }
+
+    // Release the buffered request body before streaming the response body so
+    // long-running SSE streams do not retain request buffers in memory.
+    *inline_body = None;
 
     let body = if request.method.eq_ignore_ascii_case("HEAD") {
         BodyKind::None

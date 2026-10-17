@@ -257,14 +257,6 @@ impl Default for RetryConfig {
     }
 }
 
-impl RetryConfig {
-    /// Whether an upstream HTTP status code should trigger pre-first-byte
-    /// rerouting to another healthy backend in `thin-l7` mode.
-    pub fn should_reroute_status(&self, status: u16) -> bool {
-        self.retry_statuses.contains(&status)
-    }
-}
-
 /// Metrics endpoint settings.
 #[derive(Debug, Clone, Deserialize)]
 pub struct MetricsConfig {

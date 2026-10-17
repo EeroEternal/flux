@@ -373,11 +373,6 @@ impl Scheduler {
         self.select_skipping(&[])
     }
 
-    /// Select a healthy backend that is not in `skip`.
-    ///
-    /// Used by connect retries so a refused backend is not immediately
-    /// re-picked by leastconn. Returns `None` when every healthy backend is
-    /// skipped; the caller may then fall back to [`Self::select`].
     /// Returns `true` if at least one healthy backend is not in `skip`.
     pub(crate) fn has_healthy_skipping(&self, skip: &[SocketAddr]) -> bool {
         self.backends
@@ -385,6 +380,11 @@ impl Scheduler {
             .any(|b| b.is_healthy() && !skip.contains(&b.addr))
     }
 
+    /// Select a healthy backend that is not in `skip`.
+    ///
+    /// Used by connect retries so a refused backend is not immediately
+    /// re-picked by leastconn. Returns `None` when every healthy backend is
+    /// skipped; the caller may then fall back to [`Self::select`].
     pub(crate) fn select_skipping(&self, skip: &[SocketAddr]) -> Option<Lease> {
         let backend = match self.algorithm {
             Algorithm::Leastconn => self.select_leastconn(skip),

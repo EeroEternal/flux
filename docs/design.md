@@ -36,10 +36,10 @@ management, scheduling, health checking, and transparent byte forwarding.
 
 ## 3. Core Constraints
 
-1. **Zero body buffering**: bytes read from a backend are written immediately to the client, and vice versa.
+1. **Zero response body buffering**: response bytes read from a backend are written immediately to the client; in `thin-l7` mode, fixed-length request bodies up to `retry.max_body_bytes` (default `64 MiB`) are buffered only until final response headers arrive (and freed immediately before response body streaming) so pre-first-byte status rerouting and stale pooled socket recovery can replay the request.
 2. **All-method connection reuse**: including `POST`. Connection pools are maintained per backend address with idle timeouts decoupled from stream duration.
 3. **Layered timeouts**: short connection establishment (`5s`), optional pre-response `first_byte` budget, long in-stream silence (`600s`), longer total stream ceiling (`3600s`), and independent half-close (`fin`, `30s`).
-4. **Failure semantics**: retries apply only to connection establishment before any response byte flows (default `0`). Once response bytes begin flowing, failures close both ends immediately without replay.
+4. **Failure semantics**: retries and status reroutes apply strictly **before any response byte is written to the client** (`retry.max_retries` default `-1`, trying all remaining healthy backends; `0` disables retries). In `thin-l7` mode, responses matching `retry.retry_statuses` (default `[402, 404, 429, 500, 502, 503, 504]`) drain the upstream error body and replay onto another healthy backend. Once response bytes begin flowing to the client, failures close both ends immediately without replay.
 5. **Scheduling**: weighted `leastconn` by default.
 6. **Health checking**: probes a lightweight endpoint (`GET /health`) out-of-band without disturbing in-flight streams.
 
@@ -61,8 +61,8 @@ management, scheduling, health checking, and transparent byte forwarding.
 
 ### 4.1 Forwarding Modes
 
-- **L4 (`mode = "l4"`)**: pure TCP splice with zero HTTP parsing overhead and minimal first-byte noise. Tradeoff: no header-level inspection and no cross-client backend connection reuse.
-- **Optional Thin-L7 (`mode = "thin-l7"`)**: parses only the HTTP/1.1 request/response heads and streams bodies verbatim. Because message boundaries (`Content-Length` or `chunked`) are known, completed responses safely return the backend connection to the idle pool for request-level reuse.
+- **Default Thin-L7 (`mode = "thin-l7"`)**: parses only the HTTP/1.1 request/response heads and streams response bodies verbatim. Because message boundaries (`Content-Length` or `chunked`) are known, completed responses safely return the backend connection to the idle pool for request-level reuse, and retryable pre-first-byte HTTP status codes (`retry.retry_statuses`) can be rerouted across heterogeneous backends.
+- **L4 (`mode = "l4"`)**: pure TCP splice with zero HTTP parsing overhead and minimal first-byte noise. Tradeoff: no header-level inspection, no status-code rerouting, and no cross-client backend connection reuse.
 
 ### 4.1.1 Protocol Sniffing and Automatic L4 Fallback
 
@@ -79,9 +79,9 @@ When `[server.tls]` is enabled, xLB terminates client TLS via `rustls` and passe
 | Listener | Accept client sockets | `TCP_NODELAY`, backlog, `SO_REUSEPORT` |
 | Scheduler | Pick backend | Weighted `leastconn` + health + capacity awareness; optional `roundrobin` |
 | ConnPool | Reuse backend sockets | Per-backend LIFO idle pool; idle timeout decoupled from active stream duration |
-| Proxy | Bidirectional byte transfer | Zero buffering, half-close handling, layered timeouts |
+| Proxy | Bidirectional byte transfer | Zero response buffering, pre-first-byte status rerouting (`thin-l7`), half-close handling, layered timeouts |
 | Health | Liveness probing | Out-of-band `/health` task + optional passive dial-failure circuit breaking |
-| Metrics | Observability | TTFB delta, connection reuse rate, stream duration, rejection reasons |
+| Metrics | Observability | TTFB delta, connection reuse rate, status reroutes (`xlb_reroutes_total`), stream duration, rejection reasons |
 
 ## 5. Key Mechanisms
 
@@ -95,7 +95,7 @@ When `[server.tls]` is enabled, xLB terminates client TLS via `rustls` and passe
 
 ### 5.2 Zero-Buffer Forwarding
 - **L4**: `tokio::io::copy_bidirectional` paired with an activity watchdog enforcing `first_byte` and per-direction `idle` timeouts.
-- **Thin-L7**: after parsing the HTTP head, the body is forwarded chunk-by-chunk through a bounded 16 KiB read buffer without aggregation.
+- **Thin-L7**: after parsing the HTTP head, the response body is forwarded chunk-by-chunk through a bounded 16 KiB read buffer without aggregation; fixed-length request bodies buffered for pre-first-byte replay are freed immediately upon receiving the final response head before response body streaming begins.
 
 ### 5.3 Timeout Model
 `connect` (`5s`), optional `first_byte` (pre-response TTFB budget, defaulting to `idle` when omitted; returns `504 Gateway Timeout` in `thin-l7` if exceeded before any response byte is written to the client), `idle` (`600s` in-stream silence), `total` (`3600s`), and `fin` (`30s`).
@@ -104,7 +104,7 @@ When `[server.tls]` is enabled, xLB terminates client TLS via `rustls` and passe
 Weighted `leastconn` (and `roundrobin`): prefers healthy backends that have not reached `max_conns_per_backend`, picking the backend with the lowest `active / weight` ratio (or next round-robin index) so long-running streams do not pile new requests onto busy nodes.
 
 ### 5.5 Failure Handling
-- **Pre-first-byte connection & HTTP status rerouting**: retryable up to `retry.max_retries` (default `-1`, trying all remaining healthy backends; `0` disables retries). In `thin-l7` mode, fixed-length request bodies up to `retry.max_body_bytes` (default `64 MiB`, matching `xlite`) are buffered so responses matching `retry.retry_statuses` (default `[402, 404, 429, 500, 502, 503, 504]`) before any client byte is written have their error body drained (returning keep-alive sockets to the pool) and are transparently rerouted to another healthy backend.
+- **Pre-first-byte connection & HTTP status rerouting**: retryable up to `retry.max_retries` (default `-1`, trying all remaining healthy backends; `0` disables retries). In `thin-l7` mode, fixed-length request bodies up to `retry.max_body_bytes` (default `64 MiB`, matching `xlite`) are buffered before checking out a backend socket (and freed as soon as final response headers are written to the client) so responses matching `retry.retry_statuses` (default `[402, 404, 429, 500, 502, 503, 504]`) before any client byte is written have their error body drained (returning keep-alive sockets to the pool) and are transparently rerouted to another healthy backend.
 - **Passive dial-failure circuit breaking** (optional `backends.passive_unhealthy_threshold`): marks a backend unhealthy immediately after N consecutive TCP dial failures without waiting for the next active `/health` tick, preventing `leastconn` from routing traffic to a dead `active = 0` backend between probes. Re-admits the backend after `backends.eject_cooldown` (default `5s`) unless active health checks have marked it unhealthy.
 - **Mid-stream failure**: closes both client and backend sockets immediately, records metrics, and never replays the request.
 - **Active health check failure**: marks the backend unhealthy and clears its idle pool; in-flight streams continue undisturbed while new requests are routed elsewhere.
@@ -124,7 +124,7 @@ Full HTTP frameworks (`axum` / `actix`) are intentionally avoided to eliminate i
 
 ## 7. Observability
 
-See the metrics table in `README.md`. Key signals are `xlb_ttft_delta_ms` (proxy-added first-byte latency), `xlb_conn_reuse_total` / `xlb_conn_new_total` (backend connection reuse rate), and `xlb_stream_duration_seconds` (stream lifetime distribution).
+See the metrics table in `README.md` and [`observability.md`](observability.md). Key signals are `xlb_ttft_delta_ms` (proxy-added first-byte latency), `xlb_conn_reuse_total` / `xlb_conn_new_total` (backend connection reuse rate), `xlb_reroutes_total{backend,status}` (pre-first-byte HTTP status reroutes), and `xlb_stream_duration_seconds` (stream lifetime distribution).
 
 ## 8. Deployment and Verification
 
