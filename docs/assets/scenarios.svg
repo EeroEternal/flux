@@ -1,0 +1,136 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 980 360" width="100%" height="auto" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif">
+  <defs>
+    <marker id="arrow-slate" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse">
+      <path d="M 0 1.5 L 8 5 L 0 8.5 z" fill="#64748B"/>
+    </marker>
+    <marker id="arrow-blue" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse">
+      <path d="M 0 1.5 L 8 5 L 0 8.5 z" fill="#2563EB"/>
+    </marker>
+    <marker id="arrow-amber" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse">
+      <path d="M 0 1.5 L 8 5 L 0 8.5 z" fill="#D97706"/>
+    </marker>
+    <marker id="arrow-emerald" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse">
+      <path d="M 0 1.5 L 8 5 L 0 8.5 z" fill="#059669"/>
+    </marker>
+    <filter id="shadow" x="-4%" y="-4%" width="108%" height="112%">
+      <feDropShadow dx="0" dy="2" stdDeviation="3" flood-color="#0F172A" flood-opacity="0.06"/>
+    </filter>
+  </defs>
+
+  <!-- Background -->
+  <rect x="0" y="0" width="980" height="360" rx="10" fill="#F8FAFC" stroke="#E2E8F0" stroke-width="1.5"/>
+
+  <!-- Top KPI Banner (4 Core Capability Cards) -->
+  <g filter="url(#shadow)">
+    <!-- Card 1 -->
+    <rect x="20" y="16" width="220" height="56" rx="8" fill="#FFFFFF" stroke="#CBD5E1" stroke-width="1.2"/>
+    <text x="130" y="38" text-anchor="middle" font-size="16.5" font-weight="800" fill="#1D4ED8">0 Model Catalog</text>
+    <text x="130" y="56" text-anchor="middle" font-size="10.5" font-weight="500" fill="#64748B">100% Payload-Agnostic HTTP/1.1 Framing</text>
+
+    <!-- Card 2 -->
+    <rect x="260" y="16" width="220" height="56" rx="8" fill="#FFFFFF" stroke="#CBD5E1" stroke-width="1.2"/>
+    <text x="370" y="38" text-anchor="middle" font-size="16.5" font-weight="800" fill="#D97706">402 / 404 / 429 / 5xx</text>
+    <text x="370" y="56" text-anchor="middle" font-size="10.5" font-weight="500" fill="#64748B">Pre-First-Byte Reroute (retry = -1)</text>
+
+    <!-- Card 3 -->
+    <rect x="500" y="16" width="220" height="56" rx="8" fill="#FFFFFF" stroke="#CBD5E1" stroke-width="1.2"/>
+    <text x="610" y="38" text-anchor="middle" font-size="16.5" font-weight="800" fill="#047857">64 MiB &#8594; 0 B Stream</text>
+    <text x="610" y="56" text-anchor="middle" font-size="10.5" font-weight="500" fill="#64748B">Long-Context Buffer Freed Before SSE</text>
+
+    <!-- Card 4 -->
+    <rect x="740" y="16" width="220" height="56" rx="8" fill="#FFFFFF" stroke="#CBD5E1" stroke-width="1.2"/>
+    <text x="850" y="38" text-anchor="middle" font-size="16.5" font-weight="800" fill="#0F172A">100% Pool Reuse</text>
+    <text x="850" y="56" text-anchor="middle" font-size="10.5" font-weight="500" fill="#64748B">LIFO Keep-Alive Preserved on 404 Drain</text>
+  </g>
+
+  <!-- ==================== LEFT PANEL: HETEROGENEOUS GATEWAY REROUTING ==================== -->
+  <g filter="url(#shadow)">
+    <rect x="20" y="86" width="460" height="256" rx="8" fill="#FFFFFF" stroke="#CBD5E1" stroke-width="1.2"/>
+  </g>
+  <text x="38" y="110" font-size="12.5" font-weight="700" fill="#0F172A">Scenario A · Heterogeneous Gateways (Disjoint Model Catalogs)</text>
+  <text x="38" y="125" font-size="10" fill="#64748B">Single xLB routes across specialized xlite nodes without parsing JSON or syncing DBs</text>
+
+  <!-- Client Box -->
+  <rect x="34" y="176" width="88" height="62" rx="6" fill="#F8FAFC" stroke="#94A3B8" stroke-width="1.4"/>
+  <text x="78" y="196" text-anchor="middle" font-size="11.5" font-weight="700" fill="#1E293B">Client</text>
+  <text x="78" y="211" text-anchor="middle" font-size="9.5" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" fill="#475569">mimo-v2.6</text>
+  <text x="78" y="225" text-anchor="middle" font-size="9" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" fill="#2563EB">139 KB SSE</text>
+
+  <!-- Client -> xLB Arrow -->
+  <path d="M 122 207 L 154 207" fill="none" stroke="#64748B" stroke-width="1.6" marker-end="url(#arrow-slate)"/>
+
+  <!-- xLB Core Box -->
+  <rect x="158" y="142" width="128" height="132" rx="8" fill="#EFF6FF" stroke="#2563EB" stroke-width="1.8"/>
+  <text x="222" y="163" text-anchor="middle" font-size="13" font-weight="800" fill="#1E3A8A">xLB (thin-l7)</text>
+  <rect x="168" y="171" width="108" height="24" rx="4" fill="#FFFFFF" stroke="#BFDBFE" stroke-width="1"/>
+  <text x="222" y="187" text-anchor="middle" font-size="9.5" font-weight="600" fill="#1D4ED8">1. Buffer &lt;= 64 MiB</text>
+  <rect x="168" y="201" width="108" height="24" rx="4" fill="#FFFBEB" stroke="#FCD34D" stroke-width="1"/>
+  <text x="222" y="217" text-anchor="middle" font-size="9.5" font-weight="600" fill="#B45309">2. Drain 404 &amp; Pool</text>
+  <rect x="168" y="231" width="108" height="32" rx="4" fill="#F0FDF4" stroke="#86EFAC" stroke-width="1"/>
+  <text x="222" y="245" text-anchor="middle" font-size="9.5" font-weight="600" fill="#047857">3. Replay &#8594; 200 OK</text>
+  <text x="222" y="257" text-anchor="middle" font-size="8.5" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" fill="#065F46">free body (0 B)</text>
+
+  <!-- Attempt 1: xLB -> xlite #1 (404) -->
+  <path d="M 286 176 C 306 176, 308 162, 326 162" fill="none" stroke="#D97706" stroke-width="1.6" stroke-dasharray="4 3" marker-end="url(#arrow-amber)"/>
+  <rect x="291" y="143" width="32" height="15" rx="3" fill="#FEF3C7"/>
+  <text x="307" y="154" text-anchor="middle" font-size="9" font-weight="700" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" fill="#B45309">404</text>
+
+  <!-- xlite #1 Box (DeepSeek Only) -->
+  <rect x="330" y="138" width="134" height="58" rx="6" fill="#FFFBEB" stroke="#FCD34D" stroke-width="1.4"/>
+  <circle cx="344" cy="154" r="4" fill="#10B981"/>
+  <text x="354" y="158" font-size="11.5" font-weight="700" fill="#0F172A">xlite #1 (DeepSeek)</text>
+  <text x="340" y="174" font-size="9.5" fill="#92400E">No mimo &#8594; 404 Not Found</text>
+  <text x="340" y="188" font-size="9" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" fill="#047857">socket &#8594; idle pool (healthy)</text>
+
+  <!-- Attempt 2: xLB -> xlite #2 (200 SSE) -->
+  <path d="M 286 238 C 306 238, 308 248, 326 248" fill="none" stroke="#059669" stroke-width="1.8" marker-end="url(#arrow-emerald)"/>
+  <rect x="291" y="246" width="32" height="15" rx="3" fill="#DCFCE7"/>
+  <text x="307" y="257" text-anchor="middle" font-size="9" font-weight="700" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" fill="#047857">200</text>
+
+  <!-- xlite #2 Box (Xiaomi MiMo Only) -->
+  <rect x="330" y="216" width="134" height="62" rx="6" fill="#F0FDF4" stroke="#86EFAC" stroke-width="1.5"/>
+  <circle cx="344" cy="232" r="4" fill="#10B981"/>
+  <text x="354" y="236" font-size="11.5" font-weight="700" fill="#065F46">xlite #2 (MiMo)</text>
+  <text x="340" y="252" font-size="9.5" fill="#047857">Serves mimo-v2.6-flash</text>
+  <text x="340" y="267" font-size="9" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" fill="#065F46">SSE chunks &#8594; [DONE]</text>
+
+  <!-- Bottom Caption Left -->
+  <rect x="34" y="294" width="430" height="34" rx="6" fill="#F1F5F9" stroke="#E2E8F0" stroke-width="1"/>
+  <text x="249" y="310" text-anchor="middle" font-size="10" font-weight="600" fill="#334155">4xx reroutes never trip passive health ejection · 5xx increments failure counter</text>
+  <text x="249" y="323" text-anchor="middle" font-size="9.5" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" fill="#1D4ED8">xlb_reroutes_total{backend, status=&quot;402|404|429|500|502|503|504&quot;}</text>
+
+  <!-- ==================== RIGHT PANEL: STREAMING LIFECYCLE & FAILOVER GUARDS ==================== -->
+  <g filter="url(#shadow)">
+    <rect x="500" y="86" width="460" height="256" rx="8" fill="#FFFFFF" stroke="#CBD5E1" stroke-width="1.2"/>
+  </g>
+  <text x="518" y="110" font-size="12.5" font-weight="700" fill="#0F172A">Scenario B · LLM Streaming Phases &amp; Protocol Safety Guards</text>
+  <text x="518" y="125" font-size="10" fill="#64748B">Strict pre-first-byte retry boundary + layered timeouts + zero-disruption L4 fallback</text>
+
+  <!-- Stage 1 -->
+  <rect x="518" y="138" width="424" height="44" rx="6" fill="#EFF6FF" stroke="#BFDBFE" stroke-width="1.2"/>
+  <rect x="528" y="148" width="86" height="24" rx="4" fill="#2563EB"/>
+  <text x="571" y="164" text-anchor="middle" font-size="10" font-weight="700" fill="#FFFFFF">1. Pool &amp; Dial</text>
+  <text x="626" y="156" font-size="11" font-weight="700" fill="#1E293B">LIFO Warm Checkout + Stale Socket Redial (connect: 5s)</text>
+  <text x="626" y="172" font-size="9.5" fill="#475569">Non-blocking liveness probe · Rewrites client Connection: close &#8594; keep-alive on backend leg</text>
+
+  <!-- Stage 2 -->
+  <rect x="518" y="189" width="424" height="44" rx="6" fill="#FFFBEB" stroke="#FDE68A" stroke-width="1.2"/>
+  <rect x="528" y="199" width="86" height="24" rx="4" fill="#D97706"/>
+  <text x="571" y="215" text-anchor="middle" font-size="10" font-weight="700" fill="#FFFFFF">2. TTFB Gate</text>
+  <text x="626" y="207" font-size="11" font-weight="700" fill="#92400E">Pre-First-Byte Retry &amp; Status Reroute (first_byte budget)</text>
+  <text x="626" y="223" font-size="9.5" fill="#B45309">Reroutes 402/404/429/5xx across all healthy nodes · Aborts drain on client EOF or timeout</text>
+
+  <!-- Stage 3 -->
+  <rect x="518" y="240" width="424" height="44" rx="6" fill="#F0FDF4" stroke="#86EFAC" stroke-width="1.2"/>
+  <rect x="528" y="250" width="86" height="24" rx="4" fill="#059669"/>
+  <text x="571" y="266" text-anchor="middle" font-size="10" font-weight="700" fill="#FFFFFF">3. SSE Stream</text>
+  <text x="626" y="258" font-size="11" font-weight="700" fill="#065F46">Zero-Buffer 16 KiB Framing (idle: 600s · total: 3600s)</text>
+  <text x="626" y="274" font-size="9.5" fill="#047857">Drops inline_body (0 B) before streaming · Never replays once 1st byte reaches client</text>
+
+  <!-- Stage 4 -->
+  <rect x="518" y="291" width="424" height="38" rx="6" fill="#F8FAFC" stroke="#CBD5E1" stroke-width="1.2"/>
+  <rect x="528" y="299" width="86" height="22" rx="4" fill="#475569"/>
+  <text x="571" y="314" text-anchor="middle" font-size="10" font-weight="700" fill="#FFFFFF">4. L4 Fallback</text>
+  <text x="626" y="307" font-size="10.5" font-weight="700" fill="#1E293B">Transparent Byte-Splice Fallback (HTTP/2 · gRPC · WebSocket · TLS)</text>
+  <text x="626" y="321" font-size="9.5" fill="#64748B">Re-prepends sniffed head bytes into copy_bidirectional with zero protocol interruption</text>
+</svg>

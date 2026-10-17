@@ -73,8 +73,8 @@
 
     <!-- Block C: Backend Connection Pool -->
     <rect x="212" y="212" width="246" height="46" rx="6" fill="#FFFFFF" stroke="#60A5FA" stroke-width="1.5"/>
-    <text x="335" y="230" font-size="12" font-weight="700" fill="#1D4ED8">Backend Connection Pool</text>
-    <text x="335" y="246" font-size="10.5" fill="#475569">Reuse across POSTs · Pre-byte retry</text>
+    <text x="335" y="230" font-size="12" font-weight="700" fill="#1D4ED8">Backend Pool &amp; Status Reroute</text>
+    <text x="335" y="246" font-size="10.5" fill="#475569">LIFO POST reuse · 402/404/429/5xx reroute</text>
   </g>
 
   <!-- xLB -> AI Gateways Fan-out Arrows (Pooled connections) -->
@@ -86,24 +86,24 @@
   <rect x="480" y="140" width="60" height="16" rx="3" fill="#DBEAFE"/>
   <text x="510" y="151" text-anchor="middle" font-size="9.5" font-weight="600" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" fill="#1D4ED8">pooled</text>
 
-  <!-- ==================== 3. AI GATEWAYS (LiteLLM #1, LiteLLM #2, New API) ==================== -->
+  <!-- ==================== 3. AI GATEWAYS (xlite #1, xlite #2 / LiteLLM, New API / AISIX) ==================== -->
   <g filter="url(#shadow)">
-    <!-- LiteLLM #1 -->
+    <!-- xlite #1 -->
     <rect x="550" y="52" width="180" height="56" rx="7" fill="#FFFFFF" stroke="#CBD5E1" stroke-width="1.5"/>
     <circle cx="566" cy="71" r="4" fill="#10B981"/>
-    <text x="576" y="75" font-size="13" font-weight="700" fill="#0F172A">LiteLLM #1</text>
-    <text x="562" y="94" font-size="10" fill="#64748B">Auth · Quota · Model routing</text>
+    <text x="576" y="75" font-size="13" font-weight="700" fill="#0F172A">xlite #1</text>
+    <text x="562" y="94" font-size="10" fill="#64748B">Disjoint catalog · Raw Bytes SSE</text>
 
-    <!-- LiteLLM #2 -->
+    <!-- xlite #2 / LiteLLM -->
     <rect x="550" y="130" width="180" height="56" rx="7" fill="#FFFFFF" stroke="#CBD5E1" stroke-width="1.5"/>
     <circle cx="566" cy="149" r="4" fill="#10B981"/>
-    <text x="576" y="153" font-size="13" font-weight="700" fill="#0F172A">LiteLLM #2</text>
-    <text x="562" y="172" font-size="10" fill="#64748B">Auth · Quota · Model routing</text>
+    <text x="576" y="153" font-size="13" font-weight="700" fill="#0F172A">xlite #2 / LiteLLM</text>
+    <text x="562" y="172" font-size="10" fill="#64748B">Disjoint catalog · Model routing</text>
 
-    <!-- New API -->
+    <!-- New API / AISIX -->
     <rect x="550" y="208" width="180" height="56" rx="7" fill="#FFFFFF" stroke="#CBD5E1" stroke-width="1.5"/>
     <circle cx="566" cy="227" r="4" fill="#10B981"/>
-    <text x="576" y="231" font-size="13" font-weight="700" fill="#0F172A">New API</text>
+    <text x="576" y="231" font-size="13" font-weight="700" fill="#0F172A">New API / AISIX</text>
     <text x="562" y="250" font-size="10" fill="#64748B">Key management · Token billing</text>
   </g>
 
@@ -121,7 +121,7 @@
     <text x="884" y="93" text-anchor="middle" font-size="10" fill="#047857">Cloud Model APIs</text>
 
     <rect x="810" y="132" width="148" height="52" rx="7" fill="#F0FDF4" stroke="#86EFAC" stroke-width="1.5"/>
-    <text x="884" y="153" text-anchor="middle" font-size="12.5" font-weight="700" fill="#065F46">DeepSeek / Gemini</text>
+    <text x="884" y="153" text-anchor="middle" font-size="12" font-weight="700" fill="#065F46">DeepSeek / Xiaomi MiMo</text>
     <text x="884" y="171" text-anchor="middle" font-size="10" fill="#047857">Cloud Model APIs</text>
 
     <rect x="810" y="210" width="148" height="52" rx="7" fill="#F0FDF4" stroke="#86EFAC" stroke-width="1.5"/>
