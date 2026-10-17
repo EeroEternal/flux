@@ -72,6 +72,12 @@ impl ConnBuffer {
         }
     }
 
+    /// Reset the buffer without releasing its allocated capacity.
+    pub fn clear(&mut self) {
+        self.buf.clear();
+        self.pos = 0;
+    }
+
     /// Consume the buffer and return whatever bytes have not been processed.
     ///
     /// Used by the l7 → l4 fallback: bytes already read (for example an HTTP/2
@@ -91,13 +97,18 @@ pub async fn read_head<R: AsyncRead + Unpin>(
     idle: Duration,
     deadline: Instant,
 ) -> io::Result<Option<Vec<u8>>> {
+    let mut scanned = 0usize;
     loop {
-        if let Some(end) = find_headers_end(cb.available()) {
-            let head = cb.available()[..end].to_vec();
+        let avail = cb.available();
+        let start = scanned.saturating_sub(3).min(avail.len());
+        if let Some(rel) = find_headers_end(&avail[start..]) {
+            let end = start + rel;
+            let head = avail[..end].to_vec();
             cb.consume(end);
             return Ok(Some(head));
         }
-        if cb.available().len() > max_head_bytes {
+        scanned = avail.len();
+        if scanned > max_head_bytes {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidData,
                 "message head too large",
@@ -140,13 +151,18 @@ where
     R: AsyncRead + Unpin,
     C: AsyncRead + Unpin,
 {
+    let mut scanned = 0usize;
     loop {
-        if let Some(end) = find_headers_end(cb.available()) {
-            let head = cb.available()[..end].to_vec();
+        let avail = cb.available();
+        let start = scanned.saturating_sub(3).min(avail.len());
+        if let Some(rel) = find_headers_end(&avail[start..]) {
+            let end = start + rel;
+            let head = avail[..end].to_vec();
             cb.consume(end);
             return Ok(Some(head));
         }
-        if cb.available().len() > max_head_bytes {
+        scanned = avail.len();
+        if scanned > max_head_bytes {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidData,
                 "message head too large",

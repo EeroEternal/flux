@@ -10,6 +10,10 @@ Write bullets that a human can ship from: **what changed**, **who it affects**,
 
 ## [Unreleased]
 
+### Changed
+
+- **Coalesced Thin-L7 protocol probe & keep-alive buffer reuse (`src/proxy/l7.rs`, `src/proxy/http1.rs`)**: replaced the 1-byte protocol classification read (`[0u8; 1]`) with a single `8192`-byte read into `client_buf` so typical HTTP/1.1 request heads and JSON bodies are ingested in one `read` syscall and one timer registration instead of two; hoisted `response_buf` outside the keep-alive request loop (`ConnBuffer::clear`) and made `\r\n\r\n` header-end scanning incremental across multi-packet reads. Breaking: No.
+
 ## [0.0.7] - 2026-10-17
 
 ### Added

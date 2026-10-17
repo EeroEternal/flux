@@ -39,18 +39,21 @@ where
     let idle = timeouts.idle;
     let max_head = state.config.server.max_header_bytes;
     let mut client_buf = ConnBuffer::new();
+    let mut response_buf = ConnBuffer::new();
 
     loop {
+        response_buf.clear();
         let request_start = Instant::now();
         let deadline = request_start + timeouts.total;
 
-        // Make sure we have at least one byte so the protocol can be classified
-        // before we insist on reading a full HTTP head.
+        // Read the first chunk so the protocol can be classified while also
+        // coalescing the HTTP request head (and typical JSON body) into a
+        // single `read` syscall on the common path.
         if client_buf.is_empty() {
-            let mut first = [0u8; 1];
-            match read_with_idle(&mut client, &mut first, idle, deadline).await {
+            let mut initial = [0u8; 8192];
+            match read_with_idle(&mut client, &mut initial, idle, deadline).await {
                 Ok(0) => break,
-                Ok(_) => client_buf.push(&first[..1]),
+                Ok(n) => client_buf.push(&initial[..n]),
                 Err(_) => break,
             }
         }
@@ -169,7 +172,6 @@ where
         let mut failed_backends = tagged.failed_backends;
         let mut retries_used = tagged.retries_used;
 
-        let mut response_buf = ConnBuffer::new();
         let mut wrote_to_client = false;
         let resp_result = if inline_body.is_some() {
             loop {
@@ -268,7 +270,7 @@ where
                                 lease = Some(new_lease);
                                 conn = next_conn;
                                 reused = next_reused;
-                                response_buf = ConnBuffer::new();
+                                response_buf.clear();
                                 continue;
                             }
                             Err(e2) => {
