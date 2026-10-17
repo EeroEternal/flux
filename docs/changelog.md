@@ -10,6 +10,8 @@ Write bullets that a human can ship from: **what changed**, **who it affects**,
 
 ## [Unreleased]
 
+## [0.0.7] - 2026-10-17
+
 ### Added
 
 - **Pre-first-byte HTTP status rerouting (`thin-l7`)**: when a backend returns a
