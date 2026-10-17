@@ -1613,3 +1613,113 @@ async fn thin_l7_streams_large_context_request_body_verbatim() {
     assert_eq!(received_len.load(Ordering::SeqCst), body_size);
     server.stop().await;
 }
+
+#[tokio::test]
+async fn thin_l7_reuses_backend_pool_even_when_client_sends_connection_close() {
+    let conns = Arc::new(AtomicUsize::new(0));
+    let seen_keepalive = Arc::new(AtomicUsize::new(0));
+    let handler: Handler = {
+        let seen_keepalive = seen_keepalive.clone();
+        Arc::new(move |mut socket| {
+            let seen_keepalive = seen_keepalive.clone();
+            Box::pin(async move {
+                let mut buf = Vec::new();
+                while let Some(head) = read_http_head(&mut socket, &mut buf).await {
+                    let head_text = String::from_utf8_lossy(&head).to_ascii_lowercase();
+                    if head_text.contains("connection: keep-alive") {
+                        seen_keepalive.fetch_add(1, Ordering::SeqCst);
+                    }
+                    drain_fixed_body(&mut socket, &mut buf, &head).await;
+                    let response =
+                        b"HTTP/1.1 200 OK\r\nContent-Length: 4\r\nConnection: keep-alive\r\n\r\npong";
+                    if socket.write_all(response).await.is_err() {
+                        return;
+                    }
+                }
+            })
+        })
+    };
+    let backend = spawn_backend(handler, conns.clone()).await;
+    let server = start_xlb("thin-l7", &[backend]).await;
+
+    for _ in 0..4 {
+        let mut client = TcpStream::connect(server.addr).await.unwrap();
+        client
+            .write_all(
+                b"POST /v1/chat/completions HTTP/1.1\r\nHost: xlb\r\nConnection: close\r\nContent-Length: 2\r\n\r\n{}",
+            )
+            .await
+            .unwrap();
+        let mut out = Vec::new();
+        client.read_to_end(&mut out).await.unwrap();
+        let text = String::from_utf8_lossy(&out);
+        assert!(text.contains("200 OK"), "{text}");
+        assert!(text.ends_with("pong"), "{text}");
+    }
+
+    assert_eq!(
+        conns.load(Ordering::SeqCst),
+        1,
+        "4 sequential Connection: close client requests must reuse 1 warm backend socket"
+    );
+    assert_eq!(seen_keepalive.load(Ordering::SeqCst), 4);
+    server.stop().await;
+}
+
+#[tokio::test]
+async fn thin_l7_fails_over_to_healthy_backend_when_pooled_backend_dies_pre_first_byte() {
+    let a_listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let a_addr = a_listener.local_addr().unwrap();
+    tokio::spawn(async move {
+        // Accept exactly one connection on backend A, serve the first request
+        // with keep-alive, then drop the listener and close the socket as soon
+        // as the second request arrives (simulating a backend crash mid-prefill).
+        let (mut socket, _) = a_listener.accept().await.unwrap();
+        drop(a_listener);
+        let mut buf = Vec::new();
+        let Some(head1) = read_http_head(&mut socket, &mut buf).await else {
+            return;
+        };
+        drain_fixed_body(&mut socket, &mut buf, &head1).await;
+        let _ = socket
+            .write_all(
+                b"HTTP/1.1 200 OK\r\nContent-Length: 5\r\nConnection: keep-alive\r\n\r\nfromA",
+            )
+            .await;
+        let _ = read_http_head(&mut socket, &mut buf).await;
+        drop(socket);
+    });
+
+    let b_conns = Arc::new(AtomicUsize::new(0));
+    let b_addr = spawn_backend(http_backend("fromB", true), b_conns.clone()).await;
+
+    let server = start_xlb_cfg("thin-l7", &[a_addr, b_addr], "roundrobin", 2).await;
+
+    let mut client = TestClient::connect(server.addr).await;
+    // Request 1 lands on backend A and warms A's idle pool.
+    client
+        .send(b"POST /v1/chat HTTP/1.1\r\nHost: xlb\r\nContent-Length: 2\r\n\r\n{}")
+        .await;
+    let r1 = client.read_response().await;
+    assert!(r1.ends_with("fromA"), "{r1}");
+
+    // Request 2 lands on backend B (round-robin).
+    client
+        .send(b"POST /v1/chat HTTP/1.1\r\nHost: xlb\r\nContent-Length: 2\r\n\r\n{}")
+        .await;
+    let r2 = client.read_response().await;
+    assert!(r2.ends_with("fromB"), "{r2}");
+
+    // Request 3 lands on backend A again, checks out the warm pooled socket,
+    // hits pre-first-byte EOF when A crashes, fails to redial A (listener closed),
+    // and must transparently fail over to backend B instead of returning 503.
+    client
+        .send(b"POST /v1/chat HTTP/1.1\r\nHost: xlb\r\nContent-Length: 2\r\n\r\n{}")
+        .await;
+    let r3 = client.read_response().await;
+    assert!(
+        r3.contains("200 OK") && r3.ends_with("fromB"),
+        "expected transparent failover to backend B, got: {r3}"
+    );
+    server.stop().await;
+}

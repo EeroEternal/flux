@@ -84,7 +84,7 @@ where
             return fallback_with_head(client, head, client_buf, state).await;
         }
 
-        let request = match http1::parse_request(&head) {
+        let mut request = match http1::parse_request(&head) {
             Ok(request) => request,
             Err(e) => {
                 tracing::debug!(%peer, error = %e, "unrecognized request; falling back to l4");
@@ -104,22 +104,28 @@ where
 
         let request_id = next_request_id();
         let client_keep_alive = request.keep_alive;
+        let backend_head = http1::rewrite_request_for_backend_pool(&head, &mut request);
 
-        let (mut lease, mut conn, mut reused) = match super::l4::connect_tagged(&state).await {
-            Ok(triple) => triple,
+        let tagged = match super::l4::connect_tagged(&state).await {
+            Ok(tagged) => tagged,
             Err(e) => {
                 tracing::debug!(%peer, error = %e, "no backend available");
                 write_error(&mut client, 503, idle).await;
                 break;
             }
         };
-        let backend = lease.backend().clone();
+        let mut backend = tagged.lease.backend().clone();
+        let mut lease = Some(tagged.lease);
+        let mut conn = tagged.conn;
+        let mut reused = tagged.reused;
+        let mut failed_backends = tagged.failed_backends;
+        let mut retries_used = tagged.retries_used;
 
         // When a connection is checked out from the idle pool (`reused`), a
         // concurrent backend keep-alive close can race with our request write.
         // If the request has no body or its fixed-length body is already in
-        // `client_buf`, keep that slice so we can transparently redial once on
-        // a stale-socket write error or immediate 0-byte EOF.
+        // `client_buf`, keep that slice so we can transparently redial or fail
+        // over on a stale-socket write error or immediate 0-byte EOF.
         let inline_body: Option<Vec<u8>> = if reused {
             match request.body {
                 BodyKind::None => Some(Vec::new()),
@@ -135,133 +141,128 @@ where
             None
         };
 
-        // Forward the request head and body. When `inline_body` is `Some`, the
-        // entire request is in memory so a stale pooled socket error on write
-        // or immediate pre-response EOF can transparently redial once.
-        let mut request_done;
         let mut response_buf = ConnBuffer::new();
         let mut wrote_to_client = false;
-        let mut resp_result;
-
-        if let Some(ref body_bytes) = inline_body {
-            let mut write_res =
-                send_inline_request(&mut conn, &head, body_bytes, idle, deadline).await;
-            if let Err(ref e) = write_res {
-                if reused && is_stale_reuse_error(e) {
-                    reused = false;
-                    match lease.acquire_fresh().await {
-                        Ok(fresh) => {
-                            conn = fresh;
-                            write_res =
-                                send_inline_request(&mut conn, &head, body_bytes, idle, deadline)
-                                    .await;
-                        }
-                        Err(e2) => {
-                            backend.record_upstream_error();
-                            tracing::debug!(%peer, backend = %backend.label, error = %e2, "failed to redial after stale pooled socket write error");
-                            write_error(&mut client, 503, idle).await;
-                            break;
-                        }
-                    }
-                }
-            }
-            if let Err(e) = write_res {
-                backend.record_upstream_error();
-                if e.kind() == io::ErrorKind::TimedOut {
-                    state.metrics.rejected("timeout");
-                    write_error(&mut client, 504, idle).await;
-                }
-                tracing::debug!(%peer, backend = %backend.label, error = %e, "failed to write request to backend");
-                break;
-            }
-
-            request_done = Instant::now();
-            resp_result = forward_response(
-                &mut client,
-                &mut conn,
-                &mut response_buf,
-                &mut client_buf,
-                &request,
-                max_head,
-                timeouts,
-                deadline,
-                request_done,
-                &state.metrics,
-                &mut wrote_to_client,
-            )
-            .await;
-
-            if let Err(ref e) = resp_result {
-                if reused && !wrote_to_client && response_buf.is_empty() && is_stale_reuse_error(e)
+        let resp_result = if let Some(ref body_bytes) = inline_body {
+            loop {
+                if let Err(e) =
+                    send_inline_request(&mut conn, &backend_head, body_bytes, idle, deadline).await
                 {
-                    reused = false;
-                    match lease.acquire_fresh().await {
-                        Ok(fresh) => {
-                            conn = fresh;
-                            match send_inline_request(&mut conn, &head, body_bytes, idle, deadline)
-                                .await
-                            {
-                                Ok(()) => {
-                                    request_done = Instant::now();
-                                    resp_result = forward_response(
-                                        &mut client,
-                                        &mut conn,
-                                        &mut response_buf,
-                                        &mut client_buf,
-                                        &request,
-                                        max_head,
-                                        timeouts,
-                                        deadline,
-                                        request_done,
-                                        &state.metrics,
-                                        &mut wrote_to_client,
-                                    )
-                                    .await;
-                                }
-                                Err(e2) => {
-                                    resp_result = Err(e2);
-                                }
+                    if reused && is_stale_reuse_error(&e) {
+                        match redial_or_failover(
+                            &state,
+                            &mut lease,
+                            &mut backend,
+                            &mut failed_backends,
+                            &mut retries_used,
+                        )
+                        .await
+                        {
+                            Ok((fresh, fresh_reused)) => {
+                                conn = fresh;
+                                reused = fresh_reused;
+                                continue;
+                            }
+                            Err(e2) => {
+                                tracing::debug!(%peer, backend = %backend.label, error = %e2, "failed to redial after stale pooled socket write error");
+                                write_error(&mut client, 503, idle).await;
+                                return Ok(());
                             }
                         }
-                        Err(e2) => {
-                            backend.record_upstream_error();
-                            tracing::debug!(%peer, backend = %backend.label, error = %e2, "failed to redial after stale pooled socket EOF");
-                            write_error(&mut client, 503, idle).await;
-                            break;
+                    }
+                    backend.record_upstream_error();
+                    if e.kind() == io::ErrorKind::TimedOut {
+                        state.metrics.rejected("timeout");
+                        write_error(&mut client, 504, idle).await;
+                    }
+                    tracing::debug!(%peer, backend = %backend.label, error = %e, "failed to write request to backend");
+                    return Ok(());
+                }
+
+                let request_done = Instant::now();
+                let res = forward_response(
+                    &mut client,
+                    &mut conn,
+                    &mut response_buf,
+                    &mut client_buf,
+                    &request,
+                    max_head,
+                    timeouts,
+                    deadline,
+                    request_done,
+                    &state.metrics,
+                    &mut wrote_to_client,
+                )
+                .await;
+
+                if let Err(ref e) = res {
+                    if reused
+                        && !wrote_to_client
+                        && response_buf.is_empty()
+                        && is_stale_reuse_error(e)
+                    {
+                        match redial_or_failover(
+                            &state,
+                            &mut lease,
+                            &mut backend,
+                            &mut failed_backends,
+                            &mut retries_used,
+                        )
+                        .await
+                        {
+                            Ok((fresh, fresh_reused)) => {
+                                conn = fresh;
+                                reused = fresh_reused;
+                                continue;
+                            }
+                            Err(e2) => {
+                                tracing::debug!(%peer, backend = %backend.label, error = %e2, "failed to redial after stale pooled socket EOF");
+                                write_error(&mut client, 503, idle).await;
+                                return Ok(());
+                            }
                         }
                     }
                 }
-            }
-            if reused {
-                backend.record_conn_reuse();
+                if res.is_ok() && reused {
+                    backend.record_conn_reuse();
+                }
+                break res;
             }
         } else {
-            let mut head_res = write_all_with_idle(&mut conn, &head, idle, deadline).await;
-            if let Err(ref e) = head_res {
-                if reused && is_stale_reuse_error(e) {
-                    reused = false;
-                    match lease.acquire_fresh().await {
-                        Ok(fresh) => {
-                            conn = fresh;
-                            head_res = write_all_with_idle(&mut conn, &head, idle, deadline).await;
-                        }
-                        Err(e2) => {
-                            backend.record_upstream_error();
-                            tracing::debug!(%peer, backend = %backend.label, error = %e2, "failed to redial after stale pooled socket write error");
-                            write_error(&mut client, 503, idle).await;
-                            break;
+            loop {
+                match write_all_with_idle(&mut conn, &backend_head, idle, deadline).await {
+                    Ok(()) => break,
+                    Err(e) if reused && is_stale_reuse_error(&e) => {
+                        match redial_or_failover(
+                            &state,
+                            &mut lease,
+                            &mut backend,
+                            &mut failed_backends,
+                            &mut retries_used,
+                        )
+                        .await
+                        {
+                            Ok((fresh, fresh_reused)) => {
+                                conn = fresh;
+                                reused = fresh_reused;
+                            }
+                            Err(e2) => {
+                                tracing::debug!(%peer, backend = %backend.label, error = %e2, "failed to redial after stale pooled socket write error");
+                                write_error(&mut client, 503, idle).await;
+                                return Ok(());
+                            }
                         }
                     }
+                    Err(e) => {
+                        backend.record_upstream_error();
+                        if e.kind() == io::ErrorKind::TimedOut {
+                            state.metrics.rejected("timeout");
+                            write_error(&mut client, 504, idle).await;
+                        }
+                        tracing::debug!(%peer, backend = %backend.label, error = %e, "failed to write request head");
+                        return Ok(());
+                    }
                 }
-            }
-            if let Err(e) = head_res {
-                backend.record_upstream_error();
-                if e.kind() == io::ErrorKind::TimedOut {
-                    state.metrics.rejected("timeout");
-                    write_error(&mut client, 504, idle).await;
-                }
-                tracing::debug!(%peer, backend = %backend.label, error = %e, "failed to write request head");
-                break;
             }
             if reused {
                 backend.record_conn_reuse();
@@ -280,8 +281,8 @@ where
                 tracing::debug!(%peer, backend = %backend.label, error = %e, "failed to forward request body");
                 break;
             }
-            request_done = Instant::now();
-            resp_result = forward_response(
+            let request_done = Instant::now();
+            forward_response(
                 &mut client,
                 &mut conn,
                 &mut response_buf,
@@ -294,8 +295,8 @@ where
                 &state.metrics,
                 &mut wrote_to_client,
             )
-            .await;
-        }
+            .await
+        };
 
         match resp_result {
             Ok(outcome) => {
@@ -345,6 +346,50 @@ where
     Ok(())
 }
 
+async fn redial_or_failover(
+    state: &AppState,
+    lease: &mut Option<crate::backend::Lease>,
+    backend: &mut Arc<crate::backend::Backend>,
+    failed_backends: &mut Vec<SocketAddr>,
+    retries_used: &mut u32,
+) -> anyhow::Result<(TcpStream, bool)> {
+    let fresh_res = lease
+        .as_mut()
+        .expect("active backend lease")
+        .acquire_fresh()
+        .await;
+    match fresh_res {
+        Ok(fresh) => Ok((fresh, false)),
+        Err(first_err) => {
+            backend.record_upstream_error();
+            let dead_addr = backend.addr;
+            if !failed_backends.contains(&dead_addr) {
+                failed_backends.push(dead_addr);
+            }
+            // Release the dead backend's active stream slot and concurrency
+            // permit before sleeping or selecting a failover backend.
+            *lease = None;
+            if *retries_used >= state.config.retry.max_retries {
+                let reason = if first_err.kind() == io::ErrorKind::WouldBlock {
+                    "queue_full"
+                } else {
+                    "unhealthy"
+                };
+                state.metrics.rejected(reason);
+                return Err(first_err.into());
+            }
+            *retries_used += 1;
+            let backoff_ms = 20 * (*retries_used as u64);
+            tokio::time::sleep(Duration::from_millis(backoff_ms)).await;
+            let (new_lease, conn, reused) =
+                super::l4::connect_tagged_with_budget(state, failed_backends, retries_used).await?;
+            *backend = new_lease.backend().clone();
+            *lease = Some(new_lease);
+            Ok((conn, reused))
+        }
+    }
+}
+
 async fn send_inline_request(
     conn: &mut TcpStream,
     head: &[u8],
@@ -352,11 +397,7 @@ async fn send_inline_request(
     idle: Duration,
     deadline: Instant,
 ) -> io::Result<()> {
-    write_all_with_idle(conn, head, idle, deadline).await?;
-    if !body.is_empty() {
-        write_all_with_idle(conn, body, idle, deadline).await?;
-    }
-    Ok(())
+    super::write_vectored_all_with_idle(conn, head, body, idle, deadline).await
 }
 
 fn is_stale_reuse_error(e: &io::Error) -> bool {

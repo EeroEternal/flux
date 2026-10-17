@@ -56,7 +56,10 @@ non-blocking `try_read` before storing the connection. A connection is reusable
 only when all hold:
 
 - response framing is self-delimiting (not until-close);
-- `Connection` semantics allow keep-alive on both request and response;
+- `Connection` semantics allow keep-alive on the backend leg and response (for
+  non-upgrade HTTP/1.1 requests, `Connection: close` from a short-lived client is
+  rewritten to `Connection: keep-alive` on the backend leg while still closing
+  the client connection after the response);
 - no unread bytes remain in the response buffer.
 
 L4 still reuses a connection for the lifetime of a single client connection
@@ -132,8 +135,10 @@ the backend's first byte) or `idle` (afterwards). The splice is then cancelled.
 - Retries apply **only** to connection establishment and re-select a backend.
   In `thin-l7`, if a connection checked out from the idle pool (`reused = true`)
   fails while writing the request or immediately closes with 0 response bytes
-  (HTTP/1.1 keep-alive timeout race), xLB dials one fresh connection on the
-  same lease before any response byte has been sent to the client.
+  (HTTP/1.1 keep-alive timeout race or backend crash), xLB first attempts one
+  fresh connection on the same backend and, if that dial fails, fails over
+  across other healthy backends within the `retry.max_retries` budget before any
+  response byte has been sent to the client.
 
 ## Invariants (must hold after any change)
 

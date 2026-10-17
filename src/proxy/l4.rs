@@ -274,6 +274,16 @@ where
     Ok(())
 }
 
+/// Connection state returned to thin-l7 so pre-first-byte stale-pool failover
+/// shares the same retry budget and skipped-backend set as initial connect.
+pub(crate) struct TaggedConn {
+    pub lease: Lease,
+    pub conn: TcpStream,
+    pub reused: bool,
+    pub failed_backends: Vec<SocketAddr>,
+    pub retries_used: u32,
+}
+
 /// Select a backend and establish a connection, honoring the retry policy.
 ///
 /// Retries apply only to connection establishment (never after a response
@@ -282,20 +292,39 @@ where
 /// may reuse the original set so a single backend can recover from a
 /// transient refuse.
 pub(crate) async fn connect(state: &AppState) -> anyhow::Result<(Lease, TcpStream)> {
-    let (lease, conn, reused) = connect_tagged(state).await?;
-    if reused {
-        lease.backend().record_conn_reuse();
+    let tagged = connect_tagged(state).await?;
+    if tagged.reused {
+        tagged.lease.backend().record_conn_reuse();
     }
-    Ok((lease, conn))
+    Ok((tagged.lease, tagged.conn))
 }
 
-/// Like [`connect`], also returning `true` when the connection was checked out
-/// from the backend's idle pool rather than freshly dialed.
-pub(crate) async fn connect_tagged(state: &AppState) -> anyhow::Result<(Lease, TcpStream, bool)> {
-    let mut last_error: Option<io::Error> = None;
-    let mut skip = Vec::new();
-    for attempt in 0..=state.config.retry.max_retries {
-        let mut lease = match state.scheduler.select_skipping(&skip) {
+/// Like [`connect`], also returning whether the connection was checked out
+/// from the backend's idle pool plus the retry budget state for thin-l7 failover.
+pub(crate) async fn connect_tagged(state: &AppState) -> anyhow::Result<TaggedConn> {
+    let mut failed_backends = Vec::new();
+    let mut retries_used = 0;
+    let (lease, conn, reused) =
+        connect_tagged_with_budget(state, &mut failed_backends, &mut retries_used).await?;
+    Ok(TaggedConn {
+        lease,
+        conn,
+        reused,
+        failed_backends,
+        retries_used,
+    })
+}
+
+/// Establish a backend connection while avoiding addresses in `failed_backends`
+/// and sharing `retries_used` against `state.config.retry.max_retries`.
+pub(crate) async fn connect_tagged_with_budget(
+    state: &AppState,
+    failed_backends: &mut Vec<SocketAddr>,
+    retries_used: &mut u32,
+) -> anyhow::Result<(Lease, TcpStream, bool)> {
+    let max_retries = state.config.retry.max_retries;
+    let last_error = loop {
+        let mut lease = match state.scheduler.select_skipping(failed_backends) {
             Some(lease) => lease,
             None => match state.scheduler.select() {
                 Some(lease) => lease,
@@ -309,25 +338,26 @@ pub(crate) async fn connect_tagged(state: &AppState) -> anyhow::Result<(Lease, T
         match lease.acquire_tagged().await {
             Ok((conn, reused)) => return Ok((lease, conn, reused)),
             Err(e) => {
-                if !skip.contains(&addr) {
-                    skip.push(addr);
+                drop(lease);
+                if !failed_backends.contains(&addr) {
+                    failed_backends.push(addr);
                 }
-                last_error = Some(e);
-                if attempt < state.config.retry.max_retries {
-                    tokio::time::sleep(Duration::from_millis(20 * (attempt as u64 + 1))).await;
+                if *retries_used >= max_retries {
+                    break e;
                 }
+                *retries_used += 1;
+                let backoff_ms = 20 * (*retries_used as u64);
+                tokio::time::sleep(Duration::from_millis(backoff_ms)).await;
             }
         }
-    }
-    let reason = match &last_error {
-        Some(e) if e.kind() == io::ErrorKind::WouldBlock => "queue_full",
-        _ => "unhealthy",
+    };
+    let reason = if last_error.kind() == io::ErrorKind::WouldBlock {
+        "queue_full"
+    } else {
+        "unhealthy"
     };
     state.metrics.rejected(reason);
     Err(anyhow::anyhow!(
-        "backend connect failed after retries: {}",
-        last_error
-            .map(|e| e.to_string())
-            .unwrap_or_else(|| "unknown error".to_string())
+        "backend connect failed after retries: {last_error}"
     ))
 }
