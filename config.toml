@@ -2,7 +2,7 @@
 
 [server]
 bind = "0.0.0.0:8006"
-mode = "l4"                    # l4 | thin-l7
+mode = "thin-l7"               # thin-l7 (default) | l4
 max_connections = 100000
 tcp_nodelay = true
 reuseport = false
@@ -47,7 +47,8 @@ addr = "10.56.88.33:8002"
 weight = 1
 
 [retry]
-max_retries = 0                # only applies to connection establishment
+max_retries = -1               # -1 = try all remaining healthy backends; 0 = disabled
+retry_statuses = [402, 404, 429, 500, 502, 503, 504]
 
 [metrics]
 enabled = true

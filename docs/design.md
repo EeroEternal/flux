@@ -61,7 +61,7 @@ management, scheduling, health checking, and transparent byte forwarding.
 
 ### 4.1 Forwarding Modes
 
-- **Default L4 (`mode = "l4"`)**: pure TCP splice with zero HTTP parsing overhead and minimal first-byte noise. Tradeoff: no header-level inspection and no cross-client backend connection reuse.
+- **L4 (`mode = "l4"`)**: pure TCP splice with zero HTTP parsing overhead and minimal first-byte noise. Tradeoff: no header-level inspection and no cross-client backend connection reuse.
 - **Optional Thin-L7 (`mode = "thin-l7"`)**: parses only the HTTP/1.1 request/response heads and streams bodies verbatim. Because message boundaries (`Content-Length` or `chunked`) are known, completed responses safely return the backend connection to the idle pool for request-level reuse.
 
 ### 4.1.1 Protocol Sniffing and Automatic L4 Fallback
@@ -104,7 +104,7 @@ When `[server.tls]` is enabled, xLB terminates client TLS via `rustls` and passe
 Weighted `leastconn` (and `roundrobin`): prefers healthy backends that have not reached `max_conns_per_backend`, picking the backend with the lowest `active / weight` ratio (or next round-robin index) so long-running streams do not pile new requests onto busy nodes.
 
 ### 5.5 Failure Handling
-- **Connection establishment failure**: retryable up to `retry.max_retries` (default `0`), redispatching across healthy backends and immediately clearing the failed backend's idle pool.
+- **Pre-first-byte connection & HTTP status rerouting**: retryable up to `retry.max_retries` (default `-1`, trying all remaining healthy backends; `0` disables retries). In `thin-l7` mode, responses matching `retry.retry_statuses` (default `[402, 404, 429, 500, 502, 503, 504]`) before any client byte is written have their error body drained (returning keep-alive sockets to the pool) and are transparently rerouted to another healthy backend.
 - **Passive dial-failure circuit breaking** (optional `backends.passive_unhealthy_threshold`): marks a backend unhealthy immediately after N consecutive TCP dial failures without waiting for the next active `/health` tick, preventing `leastconn` from routing traffic to a dead `active = 0` backend between probes. Re-admits the backend after `backends.eject_cooldown` (default `5s`) unless active health checks have marked it unhealthy.
 - **Mid-stream failure**: closes both client and backend sockets immediately, records metrics, and never replays the request.
 - **Active health check failure**: marks the backend unhealthy and clears its idle pool; in-flight streams continue undisturbed while new requests are routed elsewhere.

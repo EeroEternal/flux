@@ -55,6 +55,8 @@ pub struct Metrics {
     pub active_connections: IntGauge,
     /// Backend health state (1 healthy, 0 unhealthy).
     pub backend_healthy: IntGaugeVec,
+    /// Pre-first-byte HTTP status reroutes per `(backend, status)`.
+    pub reroutes_total: IntCounterVec,
 }
 
 impl Metrics {
@@ -141,6 +143,13 @@ impl Metrics {
             ),
             &["backend"],
         )?;
+        let reroutes_total = IntCounterVec::new(
+            Opts::new(
+                "xlb_reroutes_total",
+                "Pre-first-byte HTTP status reroutes to another healthy backend",
+            ),
+            &["backend", "status"],
+        )?;
 
         registry.register(Box::new(ttft_delta_ms.clone()))?;
         registry.register(Box::new(upstream_ttft_ms.clone()))?;
@@ -159,6 +168,7 @@ impl Metrics {
         registry.register(Box::new(connections_total.clone()))?;
         registry.register(Box::new(active_connections.clone()))?;
         registry.register(Box::new(backend_healthy.clone()))?;
+        registry.register(Box::new(reroutes_total.clone()))?;
 
         Ok(Arc::new(Self {
             registry,
@@ -179,6 +189,7 @@ impl Metrics {
             connections_total,
             active_connections,
             backend_healthy,
+            reroutes_total,
         }))
     }
 

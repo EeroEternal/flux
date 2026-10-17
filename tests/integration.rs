@@ -1723,3 +1723,139 @@ async fn thin_l7_fails_over_to_healthy_backend_when_pooled_backend_dies_pre_firs
     );
     server.stop().await;
 }
+
+#[tokio::test]
+async fn thin_l7_reroutes_on_404_and_502_across_asymmetric_backends_and_reuses_pool() {
+    let a_conns = Arc::new(AtomicUsize::new(0));
+    let b_conns = Arc::new(AtomicUsize::new(0));
+
+    // Backend A only serves `/v1/deepseek`; returns 404 for `/v1/mimo`.
+    let handler_a: Handler = Arc::new(|mut socket| {
+        Box::pin(async move {
+            let mut buf = Vec::new();
+            loop {
+                let Some(head) = read_http_head(&mut socket, &mut buf).await else {
+                    return;
+                };
+                let head_str = String::from_utf8_lossy(&head);
+                while buf.len() < 16 {
+                    let mut tmp = [0u8; 64];
+                    match socket.read(&mut tmp).await {
+                        Ok(0) | Err(_) => return,
+                        Ok(n) => buf.extend_from_slice(&tmp[..n]),
+                    }
+                }
+                buf.drain(..16);
+                if head_str.contains("/v1/deepseek") {
+                    let _ = socket
+                        .write_all(
+                            b"HTTP/1.1 200 OK\r\nContent-Length: 13\r\nConnection: keep-alive\r\n\r\nfrom-deepseek",
+                        )
+                        .await;
+                } else {
+                    let _ = socket
+                        .write_all(
+                            b"HTTP/1.1 404 Not Found\r\nContent-Length: 15\r\nConnection: keep-alive\r\n\r\nmodel-not-found",
+                        )
+                        .await;
+                }
+            }
+        })
+    });
+
+    // Backend B only serves `/v1/mimo`; returns 404 for `/v1/deepseek`.
+    let handler_b: Handler = Arc::new(|mut socket| {
+        Box::pin(async move {
+            let mut buf = Vec::new();
+            loop {
+                let Some(head) = read_http_head(&mut socket, &mut buf).await else {
+                    return;
+                };
+                let head_str = String::from_utf8_lossy(&head);
+                while buf.len() < 16 {
+                    let mut tmp = [0u8; 64];
+                    match socket.read(&mut tmp).await {
+                        Ok(0) | Err(_) => return,
+                        Ok(n) => buf.extend_from_slice(&tmp[..n]),
+                    }
+                }
+                buf.drain(..16);
+                if head_str.contains("/v1/mimo") {
+                    let _ = socket
+                        .write_all(
+                            b"HTTP/1.1 200 OK\r\nContent-Length: 9\r\nConnection: keep-alive\r\n\r\nfrom-mimo",
+                        )
+                        .await;
+                } else {
+                    let _ = socket
+                        .write_all(
+                            b"HTTP/1.1 404 Not Found\r\nContent-Length: 15\r\nConnection: keep-alive\r\n\r\nmodel-not-found",
+                        )
+                        .await;
+                }
+            }
+        })
+    });
+
+    let a_addr = spawn_backend(handler_a, a_conns.clone()).await;
+    let b_addr = spawn_backend(handler_b, b_conns.clone()).await;
+
+    // Omit `mode` and `[retry]` so default `mode = "thin-l7"` and `max_retries = -1` are exercised.
+    let text = format!(
+        r#"
+[server]
+bind = "127.0.0.1:0"
+
+[backends]
+algorithm = "roundrobin"
+health_interval = "0s"
+
+[[backends.servers]]
+addr = "{a_addr}"
+weight = 1
+
+[[backends.servers]]
+addr = "{b_addr}"
+weight = 1
+"#
+    );
+    let server = XlbServer::start(Config::from_toml(&text).unwrap())
+        .await
+        .unwrap();
+
+    let mut client = TestClient::connect(server.addr).await;
+    // Request 1 hits Backend A first (round-robin idx 0), which returns 404 for /v1/mimo,
+    // and xLB transparently reroutes to Backend B -> 200 OK `from-mimo`.
+    client
+        .send(b"POST /v1/mimo HTTP/1.1\r\nHost: xlb\r\nContent-Length: 16\r\n\r\n{\"model\":\"mimo\"}")
+        .await;
+    let r1 = client.read_response().await;
+    assert!(r1.contains("200 OK") && r1.ends_with("from-mimo"), "{r1}");
+
+    // Request 2 hits Backend B first (round-robin idx 1), which returns 404 for /v1/deepseek,
+    // and xLB transparently reroutes to Backend A (reusing Backend A's pooled socket!) -> 200 OK `from-deepseek`.
+    client
+        .send(b"POST /v1/deepseek HTTP/1.1\r\nHost: xlb\r\nContent-Length: 16\r\n\r\n{\"model\":\"dsk!\"}")
+        .await;
+    let r2 = client.read_response().await;
+    assert!(
+        r2.contains("200 OK") && r2.ends_with("from-deepseek"),
+        "{r2}"
+    );
+
+    // Request 3 asks for `/v1/unknown` which returns 404 on both A and B -> xLB returns the final 404 to client.
+    client
+        .send(b"POST /v1/unknown HTTP/1.1\r\nHost: xlb\r\nContent-Length: 16\r\n\r\n{\"model\":\"none\"}")
+        .await;
+    let r3 = client.read_response().await;
+    assert!(
+        r3.contains("404 Not Found") && r3.ends_with("model-not-found"),
+        "{r3}"
+    );
+
+    // Both Backend A and Backend B kept their single pooled TCP connection across all 3 requests!
+    assert_eq!(a_conns.load(Ordering::SeqCst), 1);
+    assert_eq!(b_conns.load(Ordering::SeqCst), 1);
+    drop(client);
+    server.stop().await;
+}

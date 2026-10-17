@@ -316,13 +316,13 @@ pub(crate) async fn connect_tagged(state: &AppState) -> anyhow::Result<TaggedCon
 }
 
 /// Establish a backend connection while avoiding addresses in `failed_backends`
-/// and sharing `retries_used` against `state.config.retry.max_retries`.
+/// and sharing `retries_used` against `state.config.effective_max_retries()`.
 pub(crate) async fn connect_tagged_with_budget(
     state: &AppState,
     failed_backends: &mut Vec<SocketAddr>,
     retries_used: &mut u32,
 ) -> anyhow::Result<(Lease, TcpStream, bool)> {
-    let max_retries = state.config.retry.max_retries;
+    let max_retries = state.config.effective_max_retries();
     let last_error = loop {
         let mut lease = match state.scheduler.select_skipping(failed_backends) {
             Some(lease) => lease,
