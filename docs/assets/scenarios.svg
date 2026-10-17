@@ -96,7 +96,7 @@
 
   <!-- Bottom Caption Left -->
   <rect x="34" y="294" width="430" height="34" rx="6" fill="#F1F5F9" stroke="#E2E8F0" stroke-width="1"/>
-  <text x="249" y="310" text-anchor="middle" font-size="10" font-weight="600" fill="#334155">4xx reroutes never trip passive health ejection · 5xx increments failure counter</text>
+  <text x="249" y="310" text-anchor="middle" font-size="10" font-weight="600" fill="#334155">Drains error body &amp; returns socket to LIFO pool · Skips tried node without passive ejection</text>
   <text x="249" y="323" text-anchor="middle" font-size="9.5" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" fill="#1D4ED8">xlb_reroutes_total{backend, status=&quot;402|404|429|500|502|503|504&quot;}</text>
 
   <!-- ==================== RIGHT PANEL: STREAMING LIFECYCLE & FAILOVER GUARDS ==================== -->
