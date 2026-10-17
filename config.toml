@@ -49,6 +49,7 @@ weight = 1
 [retry]
 max_retries = -1               # -1 = try all remaining healthy backends; 0 = disabled
 retry_statuses = [402, 404, 429, 500, 502, 503, 504]
+max_body_bytes = 67108864      # 64 MiB max replayable request body for thin-l7 status rerouting / stale-socket retry
 
 [metrics]
 enabled = true

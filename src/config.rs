@@ -239,6 +239,12 @@ pub struct RetryConfig {
     /// healthy backend in `thin-l7` mode (default: `[402, 404, 429, 500, 502, 503, 504]`).
     #[serde(default = "default_retry_statuses")]
     pub retry_statuses: Vec<u16>,
+    /// Maximum fixed-length request body size buffered in `thin-l7` mode so
+    /// long-context prompts (up to 64 MiB by default, matching `xlite`) can be
+    /// replayed across backends on retryable HTTP status codes or stale pooled
+    /// keep-alive sockets.
+    #[serde(default = "default_retry_max_body_bytes")]
+    pub max_body_bytes: usize,
 }
 
 impl Default for RetryConfig {
@@ -246,6 +252,7 @@ impl Default for RetryConfig {
         Self {
             max_retries: default_max_retries(),
             retry_statuses: default_retry_statuses(),
+            max_body_bytes: default_retry_max_body_bytes(),
         }
     }
 }
@@ -393,6 +400,9 @@ fn default_max_retries() -> i32 {
 }
 fn default_retry_statuses() -> Vec<u16> {
     vec![402, 404, 429, 500, 502, 503, 504]
+}
+fn default_retry_max_body_bytes() -> usize {
+    64 * 1024 * 1024
 }
 fn default_max_connections() -> usize {
     100_000

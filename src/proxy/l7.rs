@@ -121,16 +121,18 @@ where
         let mut failed_backends = tagged.failed_backends;
         let mut retries_used = tagged.retries_used;
 
-        // Buffer fixed-length request bodies up to `MAX_REROUTE_BODY_BYTES`
-        // whenever connection reuse or cross-backend retry/rerouting is active,
-        // so stale keep-alive sockets or retryable HTTP status codes (e.g. 404
-        // model-not-found on an asymmetric node, 402, 429, 5xx) can be replayed
-        // onto another healthy backend before any response byte is sent.
+        // Buffer fixed-length request bodies up to `retry.max_body_bytes`
+        // (64 MiB by default, matching `xlite`) whenever connection reuse or
+        // cross-backend retry/rerouting is active, so stale keep-alive sockets
+        // or retryable HTTP status codes (e.g. 404 model-not-found on an
+        // asymmetric node, 402, 429, 5xx) can be replayed onto another healthy
+        // backend before any response byte is sent.
         let max_retries = state.config.effective_max_retries();
+        let max_body_bytes = state.config.retry.max_body_bytes as u64;
         let inline_body: Option<Vec<u8>> = if reused || max_retries > 0 {
             match request.body {
                 BodyKind::None => Some(Vec::new()),
-                BodyKind::Length(n) if n <= max_head as u64 => {
+                BodyKind::Length(n) if n <= max_body_bytes => {
                     let len = n as usize;
                     let mut bytes = Vec::with_capacity(len);
                     let avail = client_buf.available().len().min(len);

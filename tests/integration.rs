@@ -1859,3 +1859,83 @@ weight = 1
     drop(client);
     server.stop().await;
 }
+
+#[tokio::test]
+async fn thin_l7_reroutes_long_context_sse_request_larger_than_max_header_bytes() {
+    // 128 KiB prompt body (> 64 KiB `server.max_header_bytes`) to verify long-context
+    // prompts are buffered up to `retry.max_body_bytes` and replayed across backends
+    // before streaming SSE chunks back to the client.
+    const BODY_LEN: usize = 128 * 1024;
+    let a_conns = Arc::new(AtomicUsize::new(0));
+    let b_conns = Arc::new(AtomicUsize::new(0));
+
+    let handler_a: Handler = Arc::new(|mut socket| {
+        Box::pin(async move {
+            let mut buf = Vec::new();
+            let Some(head) = read_http_head(&mut socket, &mut buf).await else {
+                return;
+            };
+            drain_fixed_body(&mut socket, &mut buf, &head).await;
+            let _ = socket
+                .write_all(
+                    b"HTTP/1.1 404 Not Found\r\nContent-Length: 15\r\nConnection: keep-alive\r\n\r\nmodel-not-found",
+                )
+                .await;
+        })
+    });
+
+    let handler_b: Handler = Arc::new(|mut socket| {
+        Box::pin(async move {
+            let mut buf = Vec::new();
+            let Some(head) = read_http_head(&mut socket, &mut buf).await else {
+                return;
+            };
+            drain_fixed_body(&mut socket, &mut buf, &head).await;
+            let _ = socket
+                .write_all(
+                    b"HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nTransfer-Encoding: chunked\r\nConnection: keep-alive\r\n\r\n",
+                )
+                .await;
+            let _ = socket
+                .write_all(b"15\r\ndata: {\"chunk\":\"1\"}\n\n\r\n")
+                .await;
+            let _ = socket
+                .write_all(b"e\r\ndata: [DONE]\n\n\r\n0\r\n\r\n")
+                .await;
+        })
+    });
+
+    let a_addr = spawn_backend(handler_a, a_conns.clone()).await;
+    let b_addr = spawn_backend(handler_b, b_conns.clone()).await;
+
+    let server = start_xlb_cfg("thin-l7", &[a_addr, b_addr], "roundrobin", 1).await;
+
+    let mut client = TcpStream::connect(server.addr).await.unwrap();
+    let body = vec![b'x'; BODY_LEN];
+    let req_head = format!(
+        "POST /v1/chat/completions HTTP/1.1\r\nHost: xlb\r\nContent-Length: {BODY_LEN}\r\n\r\n"
+    );
+    client.write_all(req_head.as_bytes()).await.unwrap();
+    client.write_all(&body).await.unwrap();
+    let mut received = Vec::new();
+    let mut buf = [0u8; 4096];
+    loop {
+        let n = client.read(&mut buf).await.unwrap();
+        assert!(n > 0, "unexpected eof before chunked terminator");
+        received.extend_from_slice(&buf[..n]);
+        if find(&received, b"\r\n\r\n").is_some() && received.ends_with(b"0\r\n\r\n") {
+            break;
+        }
+    }
+    let resp = String::from_utf8_lossy(&received);
+    assert!(
+        resp.contains("200 OK")
+            && resp.contains("data: {\"chunk\":\"1\"}")
+            && resp.contains("data: [DONE]"),
+        "expected long-context SSE response after 404 reroute, got: {resp}"
+    );
+    assert_eq!(a_conns.load(Ordering::SeqCst), 1);
+    assert_eq!(b_conns.load(Ordering::SeqCst), 1);
+    drop(client);
+    server.stop().await;
+}

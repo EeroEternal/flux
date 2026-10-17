@@ -17,8 +17,9 @@ Write bullets that a human can ship from: **what changed**, **who it affects**,
   before any response byte is written to the client and another healthy backend
   is available within the retry budget, `thin-l7` drains the error body, returns
   keep-alive sockets to the backend's idle pool, increments
-  `xlb_reroutes_total{backend, status}`, and replays the request onto the next
-  healthy backend (`src/proxy/l7.rs`, `src/proxy/http1.rs`, `src/metrics.rs`).
+  `xlb_reroutes_total{backend, status}`, and replays the request (up to
+  `retry.max_body_bytes`, default `64 MiB` for long-context prompts) onto the
+  next healthy backend (`src/proxy/l7.rs`, `src/proxy/http1.rs`, `src/metrics.rs`).
   Enables heterogeneous `xlite` clusters behind a single `xLB` without shared
   model catalogs. Breaking: No.
 
