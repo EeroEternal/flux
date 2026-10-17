@@ -132,19 +132,35 @@ the backend's first byte) or `idle` (afterwards). The splice is then cancelled.
   blackhole traffic onto a dead `active == 0` backend between active probes; the
   backend is re-admitted after `backends.eject_cooldown` (or earlier if an
   active `/health` probe succeeds).
-- Retries apply **only** to connection establishment and re-select a backend.
-  In `thin-l7`, if a connection checked out from the idle pool (`reused = true`)
-  fails while writing the request or immediately closes with 0 response bytes
-  (HTTP/1.1 keep-alive timeout race or backend crash), xLB first attempts one
-  fresh connection on the same backend and, if that dial fails, fails over
-  across other healthy backends within the `retry.max_retries` budget before any
-  response byte has been sent to the client.
+- Retries and status reroutes apply strictly **before any response byte is
+  written to the client**, bounded by `retry.max_retries` (default `-1`, which
+  expands to `backends.servers.len() - 1` so every healthy backend can be tried
+  at most once; `0` disables retries).
+- In `thin-l7` (the default `server.mode`), fixed-length request bodies up to
+  `retry.max_body_bytes` (default `64 MiB`) are buffered before checking out a
+  backend connection and freed immediately once final response headers are
+  written to the client:
+  - If a connection checked out from the idle pool (`reused = true`) fails while
+    writing the request or immediately closes with 0 response bytes (HTTP/1.1
+    keep-alive timeout race or backend crash), xLB first attempts one fresh
+    connection on the same backend and, if that dial fails, fails over across
+    other healthy backends within the retry budget.
+  - If a backend returns an HTTP status in `retry.retry_statuses` (default
+    `[402, 404, 429, 500, 502, 503, 504]`) before any response byte is written
+    to the client and another healthy backend is available, `thin-l7` drains the
+    error body (while watching for client disconnect or timeout), returns
+    self-delimiting keep-alive sockets to the backend's idle pool, increments
+    `xlb_reroutes_total{backend,status}`, and replays the request onto the next
+    healthy backend.
 
 ## Invariants (must hold after any change)
 
-1. No request or response body is ever buffered beyond one bounded read.
+1. No response body is ever buffered beyond one bounded 16 KiB read; in `thin-l7`,
+   fixed-length request bodies up to `retry.max_body_bytes` are buffered only
+   during the pre-first-byte phase for connection/status replay and are dropped
+   before response body streaming begins.
 2. A backend connection is pooled only at a proven message boundary.
-3. No request is retried after the first response byte.
+3. No request is retried after the first response byte is written to the client.
 4. `connect <= total`, `idle <= total`, and `first_byte <= total`; `fin` is independent.
 5. Any protocol thin-l7 cannot parse is forwarded byte-for-byte via L4.
 6. Every metric that has a success/increment path has a failure counterpart.
@@ -159,5 +175,7 @@ the backend's first byte) or `idle` (afterwards). The splice is then cancelled.
   covers pass-through, half-close, chunked streaming, backend reuse, pipelined
   requests, abrupt backend death, leastconn scheduling, automatic L4 fallback
   (HTTP/2, binary, Upgrade), TLS termination, opaque SSE/`[DONE]` bodies,
-  connect redispatch, and no retry after the first response byte.
+  connect redispatch, pre-first-byte HTTP status rerouting (including long-context
+  SSE requests across asymmetric backends), and no retry after the first response
+  byte.
 - `scripts/local-gates.sh` must be green before pushing.

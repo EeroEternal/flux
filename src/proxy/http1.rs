@@ -756,6 +756,85 @@ where
     }
 }
 
+/// Drain and discard a backend response body while watching for client abort
+/// or timeout so the backend socket reaches a clean HTTP/1.1 message boundary
+/// and can be returned to the idle pool.
+pub async fn drain_response_body_or_client_abort<R, C>(
+    backend: &mut R,
+    client: &mut C,
+    response_buf: &mut ConnBuffer,
+    client_buf: &mut ConnBuffer,
+    kind: BodyKind,
+    idle: Duration,
+    deadline: Instant,
+) -> io::Result<()>
+where
+    R: AsyncRead + Unpin,
+    C: AsyncRead + Unpin,
+{
+    match kind {
+        BodyKind::None => Ok(()),
+        BodyKind::Length(mut remaining) => {
+            let take = response_buf.available().len().min(remaining as usize);
+            if take > 0 {
+                response_buf.consume(take);
+                remaining -= take as u64;
+            }
+            let mut buf = [0u8; 16 * 1024];
+            while remaining > 0 {
+                let n = read_backend_or_client_eof(
+                    backend, &mut buf, client, client_buf, idle, deadline,
+                )
+                .await?;
+                if n == 0 {
+                    return Err(io::Error::new(
+                        io::ErrorKind::UnexpectedEof,
+                        "eof while draining fixed-length body",
+                    ));
+                }
+                let take = n.min(remaining as usize);
+                if take < n {
+                    response_buf.push(&buf[take..n]);
+                }
+                remaining -= take as u64;
+            }
+            Ok(())
+        }
+        BodyKind::Chunked => {
+            let mut scanner = ChunkScanner::new();
+            let mut buf = [0u8; 16 * 1024];
+            loop {
+                let consumed = {
+                    let buffered = response_buf.available();
+                    if buffered.is_empty() {
+                        0
+                    } else {
+                        scanner.consume(buffered)
+                    }
+                };
+                if consumed > 0 {
+                    response_buf.consume(consumed);
+                }
+                if scanner.is_done() {
+                    return Ok(());
+                }
+                let n = read_backend_or_client_eof(
+                    backend, &mut buf, client, client_buf, idle, deadline,
+                )
+                .await?;
+                if n == 0 {
+                    return Err(io::Error::new(
+                        io::ErrorKind::UnexpectedEof,
+                        "eof while draining chunked body",
+                    ));
+                }
+                response_buf.push(&buf[..n]);
+            }
+        }
+        BodyKind::UntilClose => Err(io::Error::other("cannot reuse close-delimited body")),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

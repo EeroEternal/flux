@@ -373,6 +373,13 @@ impl Scheduler {
         self.select_skipping(&[])
     }
 
+    /// Returns `true` if at least one healthy backend is not in `skip`.
+    pub(crate) fn has_healthy_skipping(&self, skip: &[SocketAddr]) -> bool {
+        self.backends
+            .iter()
+            .any(|b| b.is_healthy() && !skip.contains(&b.addr))
+    }
+
     /// Select a healthy backend that is not in `skip`.
     ///
     /// Used by connect retries so a refused backend is not immediately

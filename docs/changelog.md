@@ -10,6 +10,26 @@ Write bullets that a human can ship from: **what changed**, **who it affects**,
 
 ## [Unreleased]
 
+### Added
+
+- **Pre-first-byte HTTP status rerouting (`thin-l7`)**: when a backend returns a
+  status in `retry.retry_statuses` (default `[402, 404, 429, 500, 502, 503, 504]`)
+  before any response byte is written to the client and another healthy backend
+  is available within the retry budget, `thin-l7` drains the error body, returns
+  keep-alive sockets to the backend's idle pool, increments
+  `xlb_reroutes_total{backend, status}`, and replays the request (up to
+  `retry.max_body_bytes`, default `64 MiB` for long-context prompts) onto the
+  next healthy backend (`src/proxy/l7.rs`, `src/proxy/http1.rs`, `src/metrics.rs`).
+  Enables heterogeneous `xlite` clusters behind a single `xLB` without shared
+  model catalogs. Breaking: No.
+
+### Changed
+
+- **Default `server.mode = "thin-l7"` and `retry.max_retries = -1`**: `server.mode`
+  now defaults to `"thin-l7"` and `retry.max_retries` defaults to `-1` (expanding
+  to `backends.servers.len() - 1` so every healthy backend can be tried once; set
+  `0` to disable retries) (`src/config.rs`, `config.toml`). Breaking: No.
+
 ## [0.0.6] - 2026-10-17
 
 ### Fixed

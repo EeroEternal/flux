@@ -227,14 +227,34 @@ pub enum Algorithm {
     Roundrobin,
 }
 
-/// Retry policy. Retries only ever apply to connection establishment, before
-/// any response byte. Each attempt redispatches to a different healthy backend
-/// when one is available.
-#[derive(Debug, Clone, Default, Deserialize)]
+/// Retry and pre-first-byte status rerouting policy.
+#[derive(Debug, Clone, Deserialize)]
 pub struct RetryConfig {
-    /// Maximum connection-establishment retries. `0` disables retries entirely.
-    #[serde(default)]
-    pub max_retries: u32,
+    /// Maximum retries across backends. `-1` (the default) retries across all
+    /// remaining healthy backends (`backends.servers.len() - 1`); `0` disables
+    /// retries entirely.
+    #[serde(default = "default_max_retries")]
+    pub max_retries: i32,
+    /// HTTP status codes that trigger pre-first-byte rerouting to another
+    /// healthy backend in `thin-l7` mode (default: `[402, 404, 429, 500, 502, 503, 504]`).
+    #[serde(default = "default_retry_statuses")]
+    pub retry_statuses: Vec<u16>,
+    /// Maximum fixed-length request body size buffered in `thin-l7` mode so
+    /// long-context prompts (up to 64 MiB by default, matching `xlite`) can be
+    /// replayed across backends on retryable HTTP status codes or stale pooled
+    /// keep-alive sockets.
+    #[serde(default = "default_retry_max_body_bytes")]
+    pub max_body_bytes: usize,
+}
+
+impl Default for RetryConfig {
+    fn default() -> Self {
+        Self {
+            max_retries: default_max_retries(),
+            retry_statuses: default_retry_statuses(),
+            max_body_bytes: default_retry_max_body_bytes(),
+        }
+    }
 }
 
 /// Metrics endpoint settings.
@@ -336,6 +356,18 @@ impl Config {
         resolve_addr(&self.server.bind)
             .ok_or_else(|| anyhow::anyhow!("cannot resolve server.bind {:?}", self.server.bind))
     }
+
+    /// Effective retry budget for a request. `-1` expands to
+    /// `backends.servers.len().saturating_sub(1)` so every healthy backend can
+    /// be tried at most once; `0` disables retries; a positive integer caps
+    /// retries at that count.
+    pub fn effective_max_retries(&self) -> u32 {
+        if self.retry.max_retries < 0 {
+            self.backends.servers.len().saturating_sub(1) as u32
+        } else {
+            self.retry.max_retries as u32
+        }
+    }
 }
 
 /// Parse a literal socket address.
@@ -353,7 +385,16 @@ pub fn resolve_addr(raw: &str) -> Option<SocketAddr> {
 }
 
 fn default_mode() -> Mode {
-    Mode::L4
+    Mode::ThinL7
+}
+fn default_max_retries() -> i32 {
+    -1
+}
+fn default_retry_statuses() -> Vec<u16> {
+    vec![402, 404, 429, 500, 502, 503, 504]
+}
+fn default_retry_max_body_bytes() -> usize {
+    64 * 1024 * 1024
 }
 fn default_max_connections() -> usize {
     100_000
