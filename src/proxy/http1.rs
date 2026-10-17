@@ -267,6 +267,13 @@ fn contains_token(value: &[u8], token: &str) -> bool {
         .any(|part| part.trim().eq_ignore_ascii_case(token))
 }
 
+fn headers_contain_token(headers: &[httparse::Header<'_>], name: &str, token: &str) -> bool {
+    headers
+        .iter()
+        .filter(|h| h.name.eq_ignore_ascii_case(name))
+        .any(|h| contains_token(h.value, token))
+}
+
 fn parse_content_length(value: &[u8]) -> Option<u64> {
     std::str::from_utf8(value)
         .ok()
@@ -286,17 +293,10 @@ pub fn parse_request(head: &[u8]) -> Result<RequestHead, String> {
     let path = req.path.ok_or("missing request target")?.to_string();
     let version = req.version.unwrap_or(1);
 
-    let chunked = header(req.headers, "transfer-encoding")
-        .map(|v| contains_token(v, "chunked"))
-        .unwrap_or(false);
+    let chunked = headers_contain_token(req.headers, "transfer-encoding", "chunked");
     let content_length = header(req.headers, "content-length").and_then(parse_content_length);
-    let connection = header(req.headers, "connection");
-    let close = connection
-        .map(|v| contains_token(v, "close"))
-        .unwrap_or(false);
-    let keep_alive_header = connection
-        .map(|v| contains_token(v, "keep-alive"))
-        .unwrap_or(false);
+    let close = headers_contain_token(req.headers, "connection", "close");
+    let keep_alive_header = headers_contain_token(req.headers, "connection", "keep-alive");
     let has_upgrade = header(req.headers, "upgrade").is_some();
     let keep_alive = if version >= 1 {
         !close
@@ -322,6 +322,84 @@ pub fn parse_request(head: &[u8]) -> Result<RequestHead, String> {
     })
 }
 
+/// Rewrite a parsed HTTP/1.x request head so the backend leg stays eligible for
+/// connection pooling even when the downstream client sent `Connection: close`.
+///
+/// Only non-upgrade HTTP/1.1 requests with `Connection: close` are modified:
+/// the `close` token is replaced with `keep-alive` (preserving any additional
+/// connection tokens on the header) and `req.keep_alive` is updated to `true`
+/// for the backend leg.
+pub fn rewrite_request_for_backend_pool(head: &[u8], req: &mut RequestHead) -> Vec<u8> {
+    if req.keep_alive || req.has_upgrade || req.version < 1 {
+        return head.to_vec();
+    }
+    let Some(first_crlf) = head.windows(2).position(|w| w == b"\r\n") else {
+        return head.to_vec();
+    };
+    let mut out = Vec::with_capacity(head.len() + 16);
+    out.extend_from_slice(&head[..first_crlf + 2]);
+    let mut pos = first_crlf + 2;
+    let mut wrote_keep_alive = false;
+    while pos < head.len() {
+        let rem = &head[pos..];
+        if rem.starts_with(b"\r\n") {
+            if !wrote_keep_alive {
+                out.extend_from_slice(b"Connection: keep-alive\r\n");
+                wrote_keep_alive = true;
+            }
+            out.extend_from_slice(b"\r\n");
+            break;
+        }
+        let line_len = rem
+            .windows(2)
+            .position(|w| w == b"\r\n")
+            .map(|p| p + 2)
+            .unwrap_or(rem.len());
+        let line = &rem[..line_len];
+        let conn_colon = line
+            .iter()
+            .position(|&b| b == b':')
+            .filter(|&idx| line[..idx].trim_ascii().eq_ignore_ascii_case(b"connection"));
+        if let Some(colon_idx) = conn_colon {
+            let raw_val = trim_line(&line[colon_idx + 1..]);
+            let extra_tokens: Vec<&[u8]> = raw_val
+                .split(|&b| b == b',')
+                .map(|t| t.trim_ascii())
+                .filter(|t| {
+                    !t.is_empty()
+                        && !t.eq_ignore_ascii_case(b"close")
+                        && !t.eq_ignore_ascii_case(b"keep-alive")
+                })
+                .collect();
+            if !wrote_keep_alive {
+                out.extend_from_slice(b"Connection: keep-alive");
+                for tok in extra_tokens {
+                    out.extend_from_slice(b", ");
+                    out.extend_from_slice(tok);
+                }
+                out.extend_from_slice(b"\r\n");
+                wrote_keep_alive = true;
+            } else if !extra_tokens.is_empty() {
+                out.extend_from_slice(b"Connection: ");
+                for (i, tok) in extra_tokens.iter().enumerate() {
+                    if i > 0 {
+                        out.extend_from_slice(b", ");
+                    }
+                    out.extend_from_slice(tok);
+                }
+                out.extend_from_slice(b"\r\n");
+            }
+        } else {
+            out.extend_from_slice(line);
+        }
+        pos += line_len;
+    }
+    if wrote_keep_alive {
+        req.keep_alive = true;
+    }
+    out
+}
+
 /// Parse a response head. The input must include the terminating blank line.
 pub fn parse_response(head: &[u8]) -> Result<ResponseHead, String> {
     let mut headers = [httparse::EMPTY_HEADER; 64];
@@ -334,17 +412,10 @@ pub fn parse_response(head: &[u8]) -> Result<ResponseHead, String> {
     let status = resp.code.ok_or("missing status code")?;
     let version = resp.version.unwrap_or(1);
 
-    let chunked = header(resp.headers, "transfer-encoding")
-        .map(|v| contains_token(v, "chunked"))
-        .unwrap_or(false);
+    let chunked = headers_contain_token(resp.headers, "transfer-encoding", "chunked");
     let content_length = header(resp.headers, "content-length").and_then(parse_content_length);
-    let connection = header(resp.headers, "connection");
-    let close = connection
-        .map(|v| contains_token(v, "close"))
-        .unwrap_or(false);
-    let keep_alive_header = connection
-        .map(|v| contains_token(v, "keep-alive"))
-        .unwrap_or(false);
+    let close = headers_contain_token(resp.headers, "connection", "close");
+    let keep_alive_header = headers_contain_token(resp.headers, "connection", "keep-alive");
     let keep_alive = if version >= 1 {
         !close
     } else {
@@ -421,18 +492,13 @@ impl ChunkScanner {
                     i += 1;
                     self.line.push(byte);
                     if byte == b'\n' {
-                        let line = std::mem::take(&mut self.line);
-                        let line = trim_line(&line);
+                        let line = trim_line(&self.line);
                         if self.state == ChunkState::Size {
                             let size = line.split(|b| *b == b';').next().unwrap_or(&[]);
-                            let size = size
-                                .iter()
-                                .copied()
-                                .skip_while(|b| b.is_ascii_whitespace())
-                                .collect::<Vec<_>>();
-                            match std::str::from_utf8(&size)
+                            let size = size.trim_ascii();
+                            match std::str::from_utf8(size)
                                 .ok()
-                                .and_then(|s| u64::from_str_radix(s.trim(), 16).ok())
+                                .and_then(|s| u64::from_str_radix(s, 16).ok())
                             {
                                 Some(0) => self.state = ChunkState::Trailer,
                                 Some(n) => {
@@ -442,14 +508,17 @@ impl ChunkScanner {
                                 None => {
                                     // Malformed framing: treat the body as ended
                                     // rather than hanging.
+                                    self.line.clear();
                                     self.state = ChunkState::Done;
                                     break;
                                 }
                             }
                         } else if line.is_empty() {
+                            self.line.clear();
                             self.state = ChunkState::Done;
                             break;
                         }
+                        self.line.clear();
                     }
                 }
                 ChunkState::Data => {
@@ -499,11 +568,9 @@ where
     match kind {
         BodyKind::None => Ok(()),
         BodyKind::Length(mut remaining) => {
-            let buffered = cb.available();
-            let take = buffered.len().min(remaining as usize);
+            let take = cb.available().len().min(remaining as usize);
             if take > 0 {
-                let chunk = buffered[..take].to_vec();
-                write_all_with_idle(dst, &chunk, idle, deadline).await?;
+                write_all_with_idle(dst, &cb.available()[..take], idle, deadline).await?;
                 cb.consume(take);
                 remaining -= take as u64;
             }
@@ -534,13 +601,18 @@ where
         }
         BodyKind::Chunked => {
             let mut scanner = ChunkScanner::new();
-            let mut buf = vec![0u8; 16 * 1024];
+            let mut buf = [0u8; 16 * 1024];
             loop {
-                let buffered = cb.available();
-                if !buffered.is_empty() {
-                    let consumed = scanner.consume(buffered);
-                    let chunk = buffered[..consumed].to_vec();
-                    write_all_with_idle(dst, &chunk, idle, deadline).await?;
+                let consumed = {
+                    let buffered = cb.available();
+                    if buffered.is_empty() {
+                        0
+                    } else {
+                        scanner.consume(buffered)
+                    }
+                };
+                if consumed > 0 {
+                    write_all_with_idle(dst, &cb.available()[..consumed], idle, deadline).await?;
                     cb.consume(consumed);
                 }
                 if scanner.is_done() {
@@ -557,13 +629,12 @@ where
             }
         }
         BodyKind::UntilClose => {
-            let mut buf = vec![0u8; 16 * 1024];
+            let mut buf = [0u8; 16 * 1024];
             loop {
-                let buffered = cb.available();
-                if !buffered.is_empty() {
-                    let chunk = buffered.to_vec();
-                    write_all_with_idle(dst, &chunk, idle, deadline).await?;
-                    cb.consume(chunk.len());
+                let len = cb.available().len();
+                if len > 0 {
+                    write_all_with_idle(dst, cb.available(), idle, deadline).await?;
+                    cb.consume(len);
                 }
                 let n = read_with_idle(src, &mut buf, idle, deadline).await?;
                 if n == 0 {
@@ -593,11 +664,10 @@ where
     match kind {
         BodyKind::None => Ok(()),
         BodyKind::Length(mut remaining) => {
-            let buffered = response_buf.available();
-            let take = buffered.len().min(remaining as usize);
+            let take = response_buf.available().len().min(remaining as usize);
             if take > 0 {
-                let chunk = buffered[..take].to_vec();
-                write_all_with_idle(client, &chunk, idle, deadline).await?;
+                write_all_with_idle(client, &response_buf.available()[..take], idle, deadline)
+                    .await?;
                 response_buf.consume(take);
                 remaining -= take as u64;
             }
@@ -629,13 +699,24 @@ where
         }
         BodyKind::Chunked => {
             let mut scanner = ChunkScanner::new();
-            let mut buf = vec![0u8; 16 * 1024];
+            let mut buf = [0u8; 16 * 1024];
             loop {
-                let buffered = response_buf.available();
-                if !buffered.is_empty() {
-                    let consumed = scanner.consume(buffered);
-                    let chunk = buffered[..consumed].to_vec();
-                    write_all_with_idle(client, &chunk, idle, deadline).await?;
+                let consumed = {
+                    let buffered = response_buf.available();
+                    if buffered.is_empty() {
+                        0
+                    } else {
+                        scanner.consume(buffered)
+                    }
+                };
+                if consumed > 0 {
+                    write_all_with_idle(
+                        client,
+                        &response_buf.available()[..consumed],
+                        idle,
+                        deadline,
+                    )
+                    .await?;
                     response_buf.consume(consumed);
                 }
                 if scanner.is_done() {
@@ -655,13 +736,12 @@ where
             }
         }
         BodyKind::UntilClose => {
-            let mut buf = vec![0u8; 16 * 1024];
+            let mut buf = [0u8; 16 * 1024];
             loop {
-                let buffered = response_buf.available();
-                if !buffered.is_empty() {
-                    let chunk = buffered.to_vec();
-                    write_all_with_idle(client, &chunk, idle, deadline).await?;
-                    response_buf.consume(chunk.len());
+                let len = response_buf.available().len();
+                if len > 0 {
+                    write_all_with_idle(client, response_buf.available(), idle, deadline).await?;
+                    response_buf.consume(len);
                 }
                 let n = read_backend_or_client_eof(
                     backend, &mut buf, client, client_buf, idle, deadline,
@@ -764,5 +844,39 @@ mod tests {
             assert_eq!(consumed, 1, "byte {i}");
         }
         assert!(scanner.is_done());
+    }
+
+    #[test]
+    fn rewrites_connection_close_for_backend_pool() {
+        let raw = b"POST /v1/chat/completions HTTP/1.1\r\nHost: xlb\r\nConnection: close\r\nContent-Length: 2\r\n\r\n";
+        let mut req = parse_request(raw).unwrap();
+        assert!(!req.keep_alive);
+        let rewritten = rewrite_request_for_backend_pool(raw, &mut req);
+        assert!(req.keep_alive);
+        let reparsed = parse_request(&rewritten).unwrap();
+        assert!(reparsed.keep_alive);
+        assert_eq!(reparsed.body, BodyKind::Length(2));
+        let text = String::from_utf8_lossy(&rewritten);
+        assert!(text.contains("Connection: keep-alive\r\n"), "{text}");
+        assert!(!text.contains("Connection: close"), "{text}");
+
+        // Multi-token Connection header preserves non-close tokens.
+        let multi_tok =
+            b"POST /v1/chat HTTP/1.1\r\nHost: xlb\r\nConnection: close, te\r\nContent-Length: 2\r\n\r\n";
+        let mut req2 = parse_request(multi_tok).unwrap();
+        assert!(!req2.keep_alive);
+        let rewritten2 = rewrite_request_for_backend_pool(multi_tok, &mut req2);
+        assert!(req2.keep_alive);
+        let text2 = String::from_utf8_lossy(&rewritten2);
+        assert!(text2.contains("Connection: keep-alive, te\r\n"), "{text2}");
+
+        // Multiple Connection header lines where the second has close.
+        let multi_hdr = b"POST /v1/chat HTTP/1.1\r\nHost: xlb\r\nConnection: keep-alive\r\nConnection: close\r\n\r\n";
+        let mut req3 = parse_request(multi_hdr).unwrap();
+        assert!(!req3.keep_alive);
+        let rewritten3 = rewrite_request_for_backend_pool(multi_hdr, &mut req3);
+        assert!(req3.keep_alive);
+        let reparsed3 = parse_request(&rewritten3).unwrap();
+        assert!(reparsed3.keep_alive);
     }
 }
