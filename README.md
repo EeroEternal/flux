@@ -61,9 +61,31 @@ max_retries = -1          # -1 (default) = try all remaining healthy backends; 0
 retry_statuses = [402, 404, 429, 500, 502, 503, 504]
 ```
 
+## Gateway Compatibility
+
+Verified end-to-end (streaming `POST` integrity, connection pooling, client aborts, 50 concurrent streams, pre-first-byte `429` rerouting) against:
+
+| Gateway | `backends.health_check_path` | Fit |
+| --- | --- | --- |
+| **LiteLLM** (`main-stable`, ≥ 1.106) | `/health` + `health_check_headers = ["Authorization: Bearer $LITELLM_MASTER_KEY"]` | Real per-model health. Plain `/health` answers `401` once a master key is set, which would eject every backend; `/health/liveliness` works unauthenticated but only proves the process is up. |
+| **New API** / one-api (`latest`) | `/api/status` | `200` + JSON, unauthenticated. `/health` and `/healthz` are **not** endpoints: they fall through to the console SPA and return `200` HTML, so a probe there is always "healthy". |
+| **Higress** (Envoy 1.36) | any path your Ingress routes, e.g. `/v1/models` | Route must sit on the catch-all/default domain, because the probe's `Host` header is the backend address. Keep `TCP_NODELAY` on the gateway's downstream sockets: with Nagle enabled, a pooled client pays ~40 ms per small response (see [notes](docs/gateways.md#warm-connection-latency-envoy-and-any-upstream-with-nagle-on)). |
+| **xlite** | `/health` | `200` when up. |
+
+```toml
+[backends]
+health_check_path = "/health"                                              # LiteLLM
+health_check_headers = ["Authorization: Bearer sk-..."]                  # master key, if set
+# health_check_path = "/api/status"                                       # New API
+# health_check_path = "/v1/models"                                        # Higress (routed path)
+```
+
+Paths, auth and error-code retry caveats per gateway: [Gateway Integration Notes](docs/gateways.md).
+
 ## Documentation
 
 - [Observability, Metrics & Verification](docs/observability.md) — Prometheus metrics (`:9106/metrics`), structured logging, and `curl` verification for TTFT & connection reuse
+- [Gateway Integration Notes](docs/gateways.md) — health-probe path and auth for LiteLLM, New API, AISIX, Higress and xlite, the `health_check_headers` setting, and the warm-connection `TCP_NODELAY` trap
 - [Full Configuration Reference](config.toml) — annotated `config.toml` with defaults
 - [Architecture & Invariants](docs/architecture.md) — module layout, timeout hierarchy, and pooling rules
 - [Design Rationale](docs/design.md) — tradeoffs behind `thin-l7` vs `l4`
