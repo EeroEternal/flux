@@ -135,7 +135,8 @@ the backend's first byte) or `idle` (afterwards). The splice is then cancelled.
 - Retries and status reroutes apply strictly **before any response byte is
   written to the client**, bounded by `retry.max_retries` (default `-1`, which
   expands to `backends.servers.len() - 1` so every healthy backend can be tried
-  at most once; `0` disables retries).
+  at most once; `0` disables retries) and optional wall-clock ceiling
+  `retry.timeout` (`0 < retry.timeout <= timeouts.total`).
 - In `thin-l7` (the default `server.mode`), fixed-length request bodies up to
   `retry.max_body_bytes` (default `64 MiB`) are buffered before checking out a
   backend connection and freed immediately once final response headers are
@@ -144,14 +145,21 @@ the backend's first byte) or `idle` (afterwards). The splice is then cancelled.
     writing the request or immediately closes with 0 response bytes (HTTP/1.1
     keep-alive timeout race or backend crash), xLB first attempts one fresh
     connection on the same backend and, if that dial fails, fails over across
-    other healthy backends within the retry budget.
-  - If a backend returns an HTTP status in `retry.retry_statuses` (default
-    `[402, 404, 429, 500, 502, 503, 504]`) before any response byte is written
-    to the client and another healthy backend is available, `thin-l7` drains the
-    error body (while watching for client disconnect or timeout), returns
-    self-delimiting keep-alive sockets to the backend's idle pool, increments
+    other healthy backends within the retry budget and `retry.timeout`.
+  - If a backend returns an HTTP status in the effective retry status list
+    (`retry.retry_statuses`, default `[402, 404, 429, 500, 502, 503, 504]`, or
+    `retry.non_idempotent_retry_statuses` for non-idempotent methods when no
+    cross-node `Idempotency-Key` / `X-Idempotency-Key` is accepted via
+    `retry.respect_idempotency_key`) before any response byte is written to the
+    client and before `retry.timeout` expires, `thin-l7` drains the error body
+    (while watching for client disconnect or timeout), returns self-delimiting
+    keep-alive sockets to the backend's idle pool, increments
     `xlb_reroutes_total{backend,status}`, and replays the request onto the next
     healthy backend.
+  - Structured request logs include a sanitized `trace_id` extracted from
+    `X-Request-Id` / `X-Correlation-Id` (redacting secret prefixes such as
+    `sk-` or `Bearer ` and falling back to `xlb-{request_id}`) plus the attempt
+    counter so operators can correlate multi-attempt executions across nodes.
 
 ## Invariants (must hold after any change)
 
@@ -161,7 +169,7 @@ the backend's first byte) or `idle` (afterwards). The splice is then cancelled.
    before response body streaming begins.
 2. A backend connection is pooled only at a proven message boundary.
 3. No request is retried after the first response byte is written to the client.
-4. `connect <= total`, `idle <= total`, and `first_byte <= total`; `fin` is independent.
+4. `connect <= total`, `idle <= total`, `first_byte <= total`, and `retry.timeout <= total`; `fin` is independent.
 5. Any protocol thin-l7 cannot parse is forwarded byte-for-byte via L4.
 6. Every metric that has a success/increment path has a failure counterpart.
 7. Payload bytes are opaque. xLB must not parse SSE, NDJSON, JSON, or any

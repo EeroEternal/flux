@@ -13,7 +13,7 @@ xLB is directly inspired by **HAProxy's core philosophy**: a load balancer shoul
 However, traditional load balancers and Ingress controllers were designed around short, idempotent web traffic, whereas AI inference traffic is almost entirely **long-lived, non-idempotent streaming `POST`s** (`POST /v1/chat/completions`). We built xLB in Rust to make AI streaming a first-class default rather than a fragile tuning exercise:
 
 - **Aggressive `POST` connection pooling without payload inspection** — Traditional proxies (such as HAProxy's default `http-reuse safe`) avoid pooling backend connections across clients for non-idempotent `POST`s, while pure L4 proxies pin a client connection to one backend for its entire lifetime. xLB's `thin-l7` mode parses only HTTP/1.1 framing boundaries (`Content-Length` / chunked end) so every completed `POST` stream immediately returns its backend socket to a shared LIFO pool.
-- **Timeouts and retries shaped for LLM inference** — LLM workloads have distinct phases: *dial (`connect`) → prefill wait (`first_byte`) → reasoning pauses (`idle`) → multi-minute generation (`total`)*. xLB enforces this layered timeout hierarchy natively and guarantees connection retries and HTTP status reroutes (`402`/`404`/`429`/`5xx`) happen **only before the first response byte** flows to the client.
+- **Timeouts and retries shaped for LLM inference** — LLM workloads have distinct phases: *dial (`connect`) → prefill wait (`first_byte`) → reasoning pauses (`idle`) → multi-minute generation (`total`)*. xLB enforces this layered timeout hierarchy natively, bounds retries by both attempt count (`retry.max_retries`) and total retry wall-clock budget (`retry.timeout`), and can distinguish unambiguous pre-execution refusals (`402`/`404`/`429`/`503`) from in-doubt post-acceptance errors (`500`/`502`/`504`) via `retry.non_idempotent_retry_statuses` and `retry.respect_idempotency_key`.
 - **Built-in TTFT attribution & zero-buffering** — General L7 proxies (Nginx, Envoy) often buffer bodies unless explicitly disabled per route. xLB streams response bodies in fixed 16 KiB chunks with zero aggregation and natively tracks `xlb_ttft_delta_ms` (the exact first-byte latency added by the proxy itself).
 - **Decoupled from gateway lifecycles & model catalogs** — Keeps TLS termination, connection pooling, `/health` hysteresis, and pre-first-byte HTTP status rerouting out of the gateway process so LiteLLM, `xlite`, New API, or AISIX instances can scale, restart, or serve disjoint model subsets without dropping active streams or sharing a model catalog.
 
@@ -23,7 +23,7 @@ However, traditional load balancers and Ingress controllers were designed around
 
 ## Forwarding Modes
 
-- **`thin-l7` (default)** — Parses only HTTP/1.1 request and response heads (`httparse`), then streams response bodies verbatim. Because xLB knows exactly where a response ends (`Content-Length` or chunked trailer), it returns backend connections to the idle pool immediately after each stream and transparently reroutes retryable pre-first-byte HTTP status codes (`retry.retry_statuses`, default `[402, 404, 429, 500, 502, 503, 504]`) across healthy backends (`retry.max_retries = -1` by default). If a connection starts with non-HTTP/1.1 bytes (HTTP/2, WebSocket/`Upgrade`, `CONNECT`, or binary), xLB transparently replays the buffered bytes and falls back to `l4`.
+- **`thin-l7` (default)** — Parses only HTTP/1.1 request and response heads (`httparse`), then streams response bodies verbatim. Because xLB knows exactly where a response ends (`Content-Length` or chunked trailer), it returns backend connections to the idle pool immediately after each stream and transparently reroutes retryable pre-first-byte HTTP status codes (`retry.retry_statuses`, default `[402, 404, 429, 500, 502, 503, 504]`, or `retry.non_idempotent_retry_statuses` for non-idempotent `POST`s) across healthy backends (`retry.max_retries = -1` by default). If a connection starts with non-HTTP/1.1 bytes (HTTP/2, WebSocket/`Upgrade`, `CONNECT`, or binary), xLB transparently replays the buffered bytes and falls back to `l4`.
 - **`l4` (raw TCP splice)** — Pure bidirectional splice (`copy_bidirectional`) with zero protocol parsing and minimal CPU overhead. Best for raw gRPC/HTTP/2 passthrough when request-level connection pooling is not required.
 
 Client-side HTTPS can be terminated directly on xLB in either mode via `[server.tls]` (rustls, PEM cert/key).
@@ -59,6 +59,7 @@ servers = [
 [retry]
 max_retries = -1          # -1 (default) = try all remaining healthy backends; 0 = disabled
 retry_statuses = [402, 404, 429, 500, 502, 503, 504]
+# non_idempotent_retry_statuses = [402, 404, 429, 503]  # optional: avoid replaying paid POSTs on in-doubt 500/502/504
 ```
 
 ## Gateway Compatibility

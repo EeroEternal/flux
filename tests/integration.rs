@@ -2038,3 +2038,290 @@ async fn thin_l7_reroutes_long_context_sse_request_larger_than_max_header_bytes(
     drop(client);
     server.stop().await;
 }
+
+#[tokio::test]
+async fn thin_l7_distinguishes_non_idempotent_post_from_safe_or_idempotency_key_reroutes() {
+    let b_hits = Arc::new(AtomicUsize::new(0));
+
+    // Backend A returns 429 on `/v1/refused` (pre-execution refusal) and 502 on
+    // all other paths (in-doubt error that could happen after upstream acceptance).
+    let handler_a: Handler = Arc::new(|mut socket| {
+        Box::pin(async move {
+            let mut buf = Vec::new();
+            while let Some(head) = read_http_head(&mut socket, &mut buf).await {
+                let head_str = String::from_utf8_lossy(&head).into_owned();
+                drain_fixed_body(&mut socket, &mut buf, &head).await;
+                let resp: &[u8] = if head_str.contains("/v1/refused") {
+                    b"HTTP/1.1 429 Too Many Requests\r\nContent-Length: 10\r\nConnection: keep-alive\r\n\r\nrate-limit"
+                } else {
+                    b"HTTP/1.1 502 Bad Gateway\r\nContent-Length: 8\r\nConnection: keep-alive\r\n\r\nin-doubt"
+                };
+                if socket.write_all(resp).await.is_err() {
+                    return;
+                }
+            }
+        })
+    });
+
+    let handler_b: Handler = {
+        let b_hits = b_hits.clone();
+        Arc::new(move |mut socket| {
+            let b_hits = b_hits.clone();
+            Box::pin(async move {
+                let mut buf = Vec::new();
+                while let Some(head) = read_http_head(&mut socket, &mut buf).await {
+                    drain_fixed_body(&mut socket, &mut buf, &head).await;
+                    b_hits.fetch_add(1, Ordering::SeqCst);
+                    if socket
+                        .write_all(
+                            b"HTTP/1.1 200 OK\r\nContent-Length: 7\r\nConnection: keep-alive\r\n\r\nfrom-b!",
+                        )
+                        .await
+                        .is_err()
+                    {
+                        return;
+                    }
+                }
+            })
+        })
+    };
+
+    let a_addr = spawn_backend(handler_a, Arc::new(AtomicUsize::new(0))).await;
+    let b_addr = spawn_backend(handler_b, Arc::new(AtomicUsize::new(0))).await;
+
+    // Case 1: `respect_idempotency_key = false` (default) and
+    // `non_idempotent_retry_statuses = [402, 404, 429, 503]`.
+    let cfg_no_idem = format!(
+        r#"
+[server]
+bind = "127.0.0.1:0"
+mode = "thin-l7"
+
+[backends]
+algorithm = "roundrobin"
+health_interval = "0s"
+
+[[backends.servers]]
+addr = "{a_addr}"
+weight = 1
+
+[[backends.servers]]
+addr = "{b_addr}"
+weight = 1
+
+[retry]
+max_retries = 1
+retry_statuses = [402, 404, 429, 500, 502, 503, 504]
+non_idempotent_retry_statuses = [402, 404, 429, 503]
+respect_idempotency_key = false
+"#
+    );
+    let server = XlbServer::start(Config::from_toml(&cfg_no_idem).unwrap())
+        .await
+        .unwrap();
+    let mut client = TestClient::connect(server.addr).await;
+
+    // 1a. RR index 0 -> Backend A: POST hitting 502 must NOT replay on Backend B.
+    client
+        .send(
+            b"POST /v1/chat/completions HTTP/1.1\r\nHost: xlb\r\nX-Request-Id: sk-secret-123\r\nContent-Length: 2\r\n\r\n{}",
+        )
+        .await;
+    let r1 = client.read_response().await;
+    assert!(
+        r1.contains("502 Bad Gateway") && r1.ends_with("in-doubt"),
+        "expected in-doubt 502 to return without replay, got: {r1}"
+    );
+    assert_eq!(b_hits.load(Ordering::SeqCst), 0);
+
+    // Advance RR index 1 (Backend B) with a normal request so next lands on A again.
+    client
+        .send(b"GET /v1/health HTTP/1.1\r\nHost: xlb\r\n\r\n")
+        .await;
+    let _ = client.read_response().await;
+    assert_eq!(b_hits.load(Ordering::SeqCst), 1);
+
+    // 1b. RR index 0 -> Backend A: POST with Idempotency-Key still does NOT replay
+    // on 502 when `respect_idempotency_key = false`.
+    client
+        .send(
+            b"POST /v1/chat/completions HTTP/1.1\r\nHost: xlb\r\nIdempotency-Key: idem-1\r\nContent-Length: 2\r\n\r\n{}",
+        )
+        .await;
+    let r2 = client.read_response().await;
+    assert!(r2.contains("502 Bad Gateway"), "{r2}");
+    assert_eq!(b_hits.load(Ordering::SeqCst), 1);
+
+    // Advance RR index 1 (Backend B).
+    client
+        .send(b"GET /v1/health HTTP/1.1\r\nHost: xlb\r\n\r\n")
+        .await;
+    let _ = client.read_response().await;
+    assert_eq!(b_hits.load(Ordering::SeqCst), 2);
+
+    // 1c. RR index 0 -> Backend A: POST hitting 429 (pre-execution refusal) DOES
+    // reroute to Backend B.
+    client
+        .send(
+            b"POST /v1/refused HTTP/1.1\r\nHost: xlb\r\nX-Request-Id: req-429\r\nContent-Length: 2\r\n\r\n{}",
+        )
+        .await;
+    let r3 = client.read_response().await;
+    assert!(
+        r3.contains("200 OK") && r3.ends_with("from-b!"),
+        "expected pre-execution 429 on POST to reroute to Backend B, got: {r3}"
+    );
+    assert_eq!(b_hits.load(Ordering::SeqCst), 3);
+
+    // 1d. Next RR lands on Backend A (since reroute used select_skipping without
+    // advancing RR cursor, or let's verify GET /v1/models hitting 502 reroutes to B):
+    client
+        .send(b"GET /v1/models HTTP/1.1\r\nHost: xlb\r\n\r\n")
+        .await;
+    let r4 = client.read_response().await;
+    assert!(
+        r4.contains("200 OK") && r4.ends_with("from-b!"),
+        "expected safe GET hitting 502 to reroute to Backend B, got: {r4}"
+    );
+    drop(client);
+    server.stop().await;
+
+    // Case 2: `respect_idempotency_key = true` allows POST with Idempotency-Key
+    // to reroute on 502.
+    b_hits.store(0, Ordering::SeqCst);
+    let cfg_with_idem = format!(
+        r#"
+[server]
+bind = "127.0.0.1:0"
+mode = "thin-l7"
+
+[backends]
+algorithm = "roundrobin"
+health_interval = "0s"
+
+[[backends.servers]]
+addr = "{a_addr}"
+weight = 1
+
+[[backends.servers]]
+addr = "{b_addr}"
+weight = 1
+
+[retry]
+max_retries = 1
+retry_statuses = [402, 404, 429, 500, 502, 503, 504]
+non_idempotent_retry_statuses = [402, 404, 429, 503]
+respect_idempotency_key = true
+"#
+    );
+    let server2 = XlbServer::start(Config::from_toml(&cfg_with_idem).unwrap())
+        .await
+        .unwrap();
+    let mut client2 = TestClient::connect(server2.addr).await;
+    client2
+        .send(
+            b"POST /v1/chat/completions HTTP/1.1\r\nHost: xlb\r\nIdempotency-Key: idem-shared-ledger\r\nContent-Length: 2\r\n\r\n{}",
+        )
+        .await;
+    let r5 = client2.read_response().await;
+    assert!(
+        r5.contains("200 OK") && r5.ends_with("from-b!"),
+        "expected POST with Idempotency-Key to reroute on 502 when respect_idempotency_key=true, got: {r5}"
+    );
+    assert_eq!(b_hits.load(Ordering::SeqCst), 1);
+    drop(client2);
+    server2.stop().await;
+}
+
+#[tokio::test]
+async fn thin_l7_enforces_retry_timeout_ceiling_before_cross_node_reroute() {
+    let b_hits = Arc::new(AtomicUsize::new(0));
+
+    // Backend A sleeps 90ms before returning 503 Service Unavailable.
+    let handler_a: Handler = Arc::new(|mut socket| {
+        Box::pin(async move {
+            let mut buf = Vec::new();
+            if let Some(head) = read_http_head(&mut socket, &mut buf).await {
+                drain_fixed_body(&mut socket, &mut buf, &head).await;
+                tokio::time::sleep(Duration::from_millis(90)).await;
+                let _ = socket
+                    .write_all(
+                        b"HTTP/1.1 503 Service Unavailable\r\nContent-Length: 9\r\nConnection: keep-alive\r\n\r\ntoo-late!",
+                    )
+                    .await;
+            }
+        })
+    });
+
+    let handler_b: Handler = {
+        let b_hits = b_hits.clone();
+        Arc::new(move |mut socket| {
+            let b_hits = b_hits.clone();
+            Box::pin(async move {
+                let mut buf = Vec::new();
+                if let Some(head) = read_http_head(&mut socket, &mut buf).await {
+                    drain_fixed_body(&mut socket, &mut buf, &head).await;
+                    b_hits.fetch_add(1, Ordering::SeqCst);
+                    let _ = socket
+                        .write_all(
+                            b"HTTP/1.1 200 OK\r\nContent-Length: 7\r\nConnection: keep-alive\r\n\r\nfrom-b!",
+                        )
+                        .await;
+                }
+            })
+        })
+    };
+
+    let a_addr = spawn_backend(handler_a, Arc::new(AtomicUsize::new(0))).await;
+    let b_addr = spawn_backend(handler_b, Arc::new(AtomicUsize::new(0))).await;
+
+    let cfg = format!(
+        r#"
+[server]
+bind = "127.0.0.1:0"
+mode = "thin-l7"
+
+[timeouts]
+connect = "500ms"
+idle = "2s"
+total = "5s"
+fin = "500ms"
+
+[backends]
+algorithm = "roundrobin"
+health_interval = "0s"
+
+[[backends.servers]]
+addr = "{a_addr}"
+weight = 1
+
+[[backends.servers]]
+addr = "{b_addr}"
+weight = 1
+
+[retry]
+max_retries = 1
+timeout = "40ms"
+retry_statuses = [503]
+"#
+    );
+    let server = XlbServer::start(Config::from_toml(&cfg).unwrap())
+        .await
+        .unwrap();
+    let mut client = TestClient::connect(server.addr).await;
+    client
+        .send(b"POST /v1/chat HTTP/1.1\r\nHost: xlb\r\nContent-Length: 2\r\n\r\n{}")
+        .await;
+    let resp = client.read_response().await;
+    assert!(
+        resp.contains("503 Service Unavailable") && resp.ends_with("too-late!"),
+        "expected 503 from Backend A when retry.timeout (40ms) has already elapsed, got: {resp}"
+    );
+    assert_eq!(
+        b_hits.load(Ordering::SeqCst),
+        0,
+        "must not reroute to Backend B after retry.timeout ceiling"
+    );
+    drop(client);
+    server.stop().await;
+}

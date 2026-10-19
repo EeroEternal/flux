@@ -239,10 +239,29 @@ pub struct RetryConfig {
     /// retries entirely.
     #[serde(default = "default_max_retries")]
     pub max_retries: i32,
+    /// Optional wall-clock ceiling across all retry/reroute attempts before the
+    /// first response byte is written to the client. Must be `> 0s` and
+    /// `<= timeouts.total`.
+    #[serde(default, deserialize_with = "duration::deserialize_opt")]
+    pub timeout: Option<Duration>,
     /// HTTP status codes that trigger pre-first-byte rerouting to another
     /// healthy backend in `thin-l7` mode (default: `[402, 404, 429, 500, 502, 503, 504]`).
     #[serde(default = "default_retry_statuses")]
     pub retry_statuses: Vec<u16>,
+    /// Optional narrower status list for non-idempotent requests (`POST`,
+    /// `PUT`, `PATCH`, `DELETE`) when no idempotency key is accepted. Use e.g.
+    /// `[402, 404, 429, 503]` to reroute only unambiguous pre-execution
+    /// refusals while avoiding automatic cross-node replay on in-doubt `500`,
+    /// `502`, or `504` responses that may occur after upstream acceptance.
+    #[serde(default)]
+    pub non_idempotent_retry_statuses: Option<Vec<u16>>,
+    /// When `true`, non-idempotent requests carrying an `Idempotency-Key` or
+    /// `X-Idempotency-Key` header may reroute on the full `retry_statuses` list
+    /// even when `non_idempotent_retry_statuses` is configured. Defaults to
+    /// `false` because heterogeneous upstream gateways do not necessarily share
+    /// an idempotency ledger.
+    #[serde(default)]
+    pub respect_idempotency_key: bool,
     /// Maximum fixed-length request body size buffered in `thin-l7` mode so
     /// long-context prompts (up to 64 MiB by default, matching `xlite`) can be
     /// replayed across backends on retryable HTTP status codes or stale pooled
@@ -251,11 +270,32 @@ pub struct RetryConfig {
     pub max_body_bytes: usize,
 }
 
+impl RetryConfig {
+    /// Status codes eligible for pre-first-byte rerouting given request method
+    /// idempotency and presence of an idempotency key header.
+    pub fn effective_retry_statuses(
+        &self,
+        is_idempotent_method: bool,
+        has_idempotency_key: bool,
+    ) -> &[u16] {
+        if is_idempotent_method || (self.respect_idempotency_key && has_idempotency_key) {
+            &self.retry_statuses
+        } else if let Some(ref statuses) = self.non_idempotent_retry_statuses {
+            statuses.as_slice()
+        } else {
+            &self.retry_statuses
+        }
+    }
+}
+
 impl Default for RetryConfig {
     fn default() -> Self {
         Self {
             max_retries: default_max_retries(),
+            timeout: None,
             retry_statuses: default_retry_statuses(),
+            non_idempotent_retry_statuses: None,
+            respect_idempotency_key: false,
             max_body_bytes: default_retry_max_body_bytes(),
         }
     }
@@ -335,6 +375,14 @@ impl Config {
             }
             if self.timeouts.total < first_byte {
                 anyhow::bail!("timeouts.total must be >= timeouts.first_byte");
+            }
+        }
+        if let Some(retry_timeout) = self.retry.timeout {
+            if retry_timeout.is_zero() {
+                anyhow::bail!("retry.timeout must be greater than zero");
+            }
+            if self.timeouts.total < retry_timeout {
+                anyhow::bail!("timeouts.total must be >= retry.timeout");
             }
         }
         if let Some(acquire_timeout) = self.pool.acquire_timeout {
@@ -617,6 +665,65 @@ total = "600s"
 [backends]
 [[backends.servers]]
 addr = "127.0.0.1:8001"
+"#;
+        assert!(Config::from_toml(exceeds_total).is_err());
+    }
+
+    #[test]
+    fn validates_retry_timeout_and_idempotency_policy() {
+        let valid = r#"
+[server]
+bind = "0.0.0.0:8006"
+[timeouts]
+idle = "30s"
+total = "60s"
+[backends]
+[[backends.servers]]
+addr = "127.0.0.1:8001"
+[retry]
+timeout = "10s"
+retry_statuses = [402, 404, 429, 500, 502, 503, 504]
+non_idempotent_retry_statuses = [402, 404, 429, 503]
+respect_idempotency_key = true
+"#;
+        let cfg = Config::from_toml(valid).unwrap();
+        assert_eq!(cfg.retry.timeout, Some(Duration::from_secs(10)));
+        assert_eq!(
+            cfg.retry.effective_retry_statuses(false, false),
+            &[402, 404, 429, 503]
+        );
+        assert_eq!(
+            cfg.retry.effective_retry_statuses(false, true),
+            &[402, 404, 429, 500, 502, 503, 504]
+        );
+        assert_eq!(
+            cfg.retry.effective_retry_statuses(true, false),
+            &[402, 404, 429, 500, 502, 503, 504]
+        );
+
+        let zero = r#"
+[server]
+bind = "0.0.0.0:8006"
+[backends]
+[[backends.servers]]
+addr = "127.0.0.1:8001"
+[retry]
+timeout = "0s"
+"#;
+        assert!(Config::from_toml(zero).is_err());
+
+        let exceeds_total = r#"
+[server]
+bind = "0.0.0.0:8006"
+[timeouts]
+connect = "1s"
+idle = "5s"
+total = "10s"
+[backends]
+[[backends.servers]]
+addr = "127.0.0.1:8001"
+[retry]
+timeout = "20s"
 "#;
         assert!(Config::from_toml(exceeds_total).is_err());
     }

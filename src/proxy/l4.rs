@@ -302,10 +302,25 @@ pub(crate) async fn connect(state: &AppState) -> anyhow::Result<(Lease, TcpStrea
 /// Like [`connect`], also returning whether the connection was checked out
 /// from the backend's idle pool plus the retry budget state for thin-l7 failover.
 pub(crate) async fn connect_tagged(state: &AppState) -> anyhow::Result<TaggedConn> {
+    let retry_deadline = state.config.retry.timeout.map(|d| Instant::now() + d);
+    connect_tagged_with_deadline(state, retry_deadline).await
+}
+
+/// Like [`connect_tagged`], using an explicit retry wall-clock deadline (for
+/// example anchored to `request_start` in `thin-l7`).
+pub(crate) async fn connect_tagged_with_deadline(
+    state: &AppState,
+    retry_deadline: Option<Instant>,
+) -> anyhow::Result<TaggedConn> {
     let mut failed_backends = Vec::new();
     let mut retries_used = 0;
-    let (lease, conn, reused) =
-        connect_tagged_with_budget(state, &mut failed_backends, &mut retries_used).await?;
+    let (lease, conn, reused) = connect_tagged_with_budget(
+        state,
+        &mut failed_backends,
+        &mut retries_used,
+        retry_deadline,
+    )
+    .await?;
     Ok(TaggedConn {
         lease,
         conn,
@@ -316,11 +331,13 @@ pub(crate) async fn connect_tagged(state: &AppState) -> anyhow::Result<TaggedCon
 }
 
 /// Establish a backend connection while avoiding addresses in `failed_backends`
-/// and sharing `retries_used` against `state.config.effective_max_retries()`.
+/// and sharing `retries_used` against `state.config.effective_max_retries()`
+/// and `retry_deadline`.
 pub(crate) async fn connect_tagged_with_budget(
     state: &AppState,
     failed_backends: &mut Vec<SocketAddr>,
     retries_used: &mut u32,
+    retry_deadline: Option<Instant>,
 ) -> anyhow::Result<(Lease, TcpStream, bool)> {
     let max_retries = state.config.effective_max_retries();
     let last_error = loop {
@@ -342,12 +359,19 @@ pub(crate) async fn connect_tagged_with_budget(
                 if !failed_backends.contains(&addr) {
                     failed_backends.push(addr);
                 }
-                if *retries_used >= max_retries {
+                if *retries_used >= max_retries
+                    || retry_deadline.is_some_and(|dl| Instant::now() >= dl)
+                {
                     break e;
                 }
+                let backoff = Duration::from_millis(20 * ((*retries_used + 1) as u64));
+                if let Some(dl) = retry_deadline {
+                    if dl.saturating_duration_since(Instant::now()) < backoff {
+                        break e;
+                    }
+                }
                 *retries_used += 1;
-                let backoff_ms = 20 * (*retries_used as u64);
-                tokio::time::sleep(Duration::from_millis(backoff_ms)).await;
+                tokio::time::sleep(backoff).await;
             }
         }
     };

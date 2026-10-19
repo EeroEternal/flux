@@ -255,6 +255,23 @@ pub struct RequestHead {
     pub keep_alive: bool,
     /// Whether the request asks for a protocol upgrade (WebSocket, h2c, ...).
     pub has_upgrade: bool,
+    /// Whether the request carries a non-empty `Idempotency-Key` or
+    /// `X-Idempotency-Key` header.
+    pub has_idempotency_key: bool,
+    /// Sanitized correlation identifier from `X-Request-Id` or
+    /// `X-Correlation-Id` (redacted when a credential prefix is detected).
+    pub trace_id: Option<String>,
+}
+
+impl RequestHead {
+    /// True for read-only / safe HTTP methods (`GET`, `HEAD`, `OPTIONS`,
+    /// `TRACE`) that can be retried across backends without side effects.
+    pub fn is_idempotent_method(&self) -> bool {
+        self.method.eq_ignore_ascii_case("GET")
+            || self.method.eq_ignore_ascii_case("HEAD")
+            || self.method.eq_ignore_ascii_case("OPTIONS")
+            || self.method.eq_ignore_ascii_case("TRACE")
+    }
 }
 
 /// A parsed HTTP response status line plus framing headers.
@@ -275,6 +292,47 @@ fn header<'a>(headers: &'a [httparse::Header<'a>], name: &str) -> Option<&'a [u8
         .iter()
         .find(|h| h.name.eq_ignore_ascii_case(name))
         .map(|h| h.value)
+}
+
+fn has_non_empty_header(headers: &[httparse::Header<'_>], name: &str) -> bool {
+    header(headers, name).is_some_and(|v| !v.trim_ascii().is_empty())
+}
+
+/// Sanitize a correlation header value for structured logs so secret tokens
+/// accidentally passed in `X-Request-Id` / `X-Correlation-Id` are redacted and
+/// log injection / unbounded strings are prevented.
+pub fn sanitize_trace_id(raw: &[u8]) -> Option<String> {
+    let trimmed = raw.trim_ascii();
+    if trimmed.is_empty() {
+        return None;
+    }
+    let text = std::str::from_utf8(trimmed).ok()?;
+    let lower = text.to_ascii_lowercase();
+    if lower.starts_with("sk-")
+        || lower.starts_with("rk-")
+        || lower.starts_with("ak-")
+        || lower.starts_with("bearer ")
+        || lower.starts_with("basic ")
+        || text.bytes().any(|b| b.is_ascii_whitespace())
+    {
+        return Some("<redacted>".to_string());
+    }
+    let sanitized: String = text
+        .bytes()
+        .take(64)
+        .map(|b| {
+            if b.is_ascii_alphanumeric() || matches!(b, b'-' | b'_' | b'.' | b':') {
+                b as char
+            } else {
+                '_'
+            }
+        })
+        .collect();
+    if sanitized.is_empty() {
+        None
+    } else {
+        Some(sanitized)
+    }
 }
 
 fn contains_token(value: &[u8], token: &str) -> bool {
@@ -314,6 +372,11 @@ pub fn parse_request(head: &[u8]) -> Result<RequestHead, String> {
     let close = headers_contain_token(req.headers, "connection", "close");
     let keep_alive_header = headers_contain_token(req.headers, "connection", "keep-alive");
     let has_upgrade = header(req.headers, "upgrade").is_some();
+    let has_idempotency_key = has_non_empty_header(req.headers, "idempotency-key")
+        || has_non_empty_header(req.headers, "x-idempotency-key");
+    let trace_id = header(req.headers, "x-request-id")
+        .or_else(|| header(req.headers, "x-correlation-id"))
+        .and_then(sanitize_trace_id);
     let keep_alive = if version >= 1 {
         !close
     } else {
@@ -335,6 +398,8 @@ pub fn parse_request(head: &[u8]) -> Result<RequestHead, String> {
         body,
         keep_alive,
         has_upgrade,
+        has_idempotency_key,
+        trace_id,
     })
 }
 
@@ -973,5 +1038,37 @@ mod tests {
         assert!(req3.keep_alive);
         let reparsed3 = parse_request(&rewritten3).unwrap();
         assert!(reparsed3.keep_alive);
+    }
+
+    #[test]
+    fn parses_idempotency_key_and_redacts_trace_id() {
+        let get_req =
+            parse_request(b"GET /v1/models HTTP/1.1\r\nHost: x\r\nX-Request-Id: req-123:a\r\n\r\n")
+                .unwrap();
+        assert!(get_req.is_idempotent_method());
+        assert!(!get_req.has_idempotency_key);
+        assert_eq!(get_req.trace_id.as_deref(), Some("req-123:a"));
+
+        let post_req = parse_request(
+            b"POST /v1/chat/completions HTTP/1.1\r\nHost: x\r\nIdempotency-Key: idem-42\r\nX-Correlation-Id: sk-secret-token-value\r\n\r\n",
+        )
+        .unwrap();
+        assert!(!post_req.is_idempotent_method());
+        assert!(post_req.has_idempotency_key);
+        assert_eq!(post_req.trace_id.as_deref(), Some("<redacted>"));
+
+        let bearer_req = parse_request(
+            b"POST /v1/chat HTTP/1.1\r\nHost: x\r\nX-Idempotency-Key:   \r\nX-Request-Id: Bearer abcdef\r\n\r\n",
+        )
+        .unwrap();
+        assert!(!bearer_req.has_idempotency_key);
+        assert_eq!(bearer_req.trace_id.as_deref(), Some("<redacted>"));
+
+        let long_id = "a".repeat(90);
+        let raw =
+            format!("DELETE /v1/files/1 HTTP/1.1\r\nHost: x\r\nX-Request-Id: {long_id}\r\n\r\n");
+        let del_req = parse_request(raw.as_bytes()).unwrap();
+        assert!(!del_req.is_idempotent_method());
+        assert_eq!(del_req.trace_id.as_deref().map(str::len), Some(64));
     }
 }

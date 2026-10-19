@@ -106,6 +106,11 @@ where
         }
 
         let request_id = next_request_id();
+        let trace_id = request
+            .trace_id
+            .clone()
+            .unwrap_or_else(|| format!("xlb-{request_id}"));
+        let retry_deadline = state.config.retry.timeout.map(|d| request_start + d);
         let client_keep_alive = request.keep_alive;
         let backend_head = http1::rewrite_request_for_backend_pool(&head, &mut request);
 
@@ -157,10 +162,10 @@ where
             None
         };
 
-        let tagged = match super::l4::connect_tagged(&state).await {
+        let tagged = match super::l4::connect_tagged_with_deadline(&state, retry_deadline).await {
             Ok(tagged) => tagged,
             Err(e) => {
-                tracing::debug!(%peer, error = %e, "no backend available");
+                tracing::debug!(request_id, trace_id = %trace_id, %peer, error = %e, "no backend available");
                 write_error(&mut client, 503, idle).await;
                 break;
             }
@@ -171,6 +176,11 @@ where
         let mut reused = tagged.reused;
         let mut failed_backends = tagged.failed_backends;
         let mut retries_used = tagged.retries_used;
+
+        let effective_statuses = state
+            .config
+            .retry
+            .effective_retry_statuses(request.is_idempotent_method(), request.has_idempotency_key);
 
         let mut wrote_to_client = false;
         let resp_result = if inline_body.is_some() {
@@ -188,6 +198,7 @@ where
                             &mut backend,
                             &mut failed_backends,
                             &mut retries_used,
+                            retry_deadline,
                         )
                         .await
                         {
@@ -197,7 +208,15 @@ where
                                 continue;
                             }
                             Err(e2) => {
-                                tracing::debug!(%peer, backend = %backend.label, error = %e2, "failed to redial after stale pooled socket write error");
+                                tracing::debug!(
+                                    request_id,
+                                    trace_id = %trace_id,
+                                    attempt = retries_used + 1,
+                                    %peer,
+                                    backend = %backend.label,
+                                    error = %e2,
+                                    "failed to redial after stale pooled socket write error"
+                                );
                                 write_error(&mut client, 503, idle).await;
                                 return Ok(());
                             }
@@ -208,19 +227,29 @@ where
                         state.metrics.rejected("timeout");
                         write_error(&mut client, 504, idle).await;
                     }
-                    tracing::debug!(%peer, backend = %backend.label, error = %e, "failed to write request to backend");
+                    tracing::debug!(
+                        request_id,
+                        trace_id = %trace_id,
+                        attempt = retries_used + 1,
+                        %peer,
+                        backend = %backend.label,
+                        error = %e,
+                        "failed to write request to backend"
+                    );
                     return Ok(());
                 }
 
-                let can_reroute_status = retries_used < max_retries && {
-                    let mut next_skip = failed_backends.clone();
-                    if !next_skip.contains(&backend.addr) {
-                        next_skip.push(backend.addr);
-                    }
-                    state.scheduler.has_healthy_skipping(&next_skip)
-                };
-                let reroute_statuses =
-                    can_reroute_status.then_some(state.config.retry.retry_statuses.as_slice());
+                let can_reroute_status = !effective_statuses.is_empty()
+                    && retries_used < max_retries
+                    && retry_deadline.is_none_or(|dl| Instant::now() < dl)
+                    && {
+                        let mut next_skip = failed_backends.clone();
+                        if !next_skip.contains(&backend.addr) {
+                            next_skip.push(backend.addr);
+                        }
+                        state.scheduler.has_healthy_skipping(&next_skip)
+                    };
+                let reroute_statuses = can_reroute_status.then_some(effective_statuses);
 
                 let request_done = Instant::now();
                 let res = forward_response(
@@ -232,6 +261,7 @@ where
                     max_head,
                     timeouts,
                     deadline,
+                    retry_deadline,
                     request_done,
                     &state.metrics,
                     &mut wrote_to_client,
@@ -253,6 +283,7 @@ where
                             .reroutes_total
                             .with_label_values(&[&backend.label, &status.to_string()])
                             .inc();
+                        let prev_backend = backend.label.clone();
                         if !failed_backends.contains(&backend.addr) {
                             failed_backends.push(backend.addr);
                         }
@@ -262,6 +293,7 @@ where
                             &state,
                             &mut failed_backends,
                             &mut retries_used,
+                            retry_deadline,
                         )
                         .await
                         {
@@ -271,10 +303,27 @@ where
                                 conn = next_conn;
                                 reused = next_reused;
                                 response_buf.clear();
+                                tracing::debug!(
+                                    request_id,
+                                    trace_id = %trace_id,
+                                    attempt = retries_used + 1,
+                                    from_backend = %prev_backend,
+                                    to_backend = %backend.label,
+                                    status,
+                                    "rerouting request on retryable status"
+                                );
                                 continue;
                             }
                             Err(e2) => {
-                                tracing::debug!(%peer, status, error = %e2, "status reroute failed to connect to next backend");
+                                tracing::debug!(
+                                    request_id,
+                                    trace_id = %trace_id,
+                                    attempt = retries_used + 1,
+                                    %peer,
+                                    status,
+                                    error = %e2,
+                                    "status reroute failed to connect to next backend"
+                                );
                                 write_error(&mut client, 503, idle).await;
                                 return Ok(());
                             }
@@ -294,6 +343,7 @@ where
                             &mut backend,
                             &mut failed_backends,
                             &mut retries_used,
+                            retry_deadline,
                         )
                         .await
                         {
@@ -303,7 +353,15 @@ where
                                 continue;
                             }
                             Err(e2) => {
-                                tracing::debug!(%peer, backend = %backend.label, error = %e2, "failed to redial after stale pooled socket EOF");
+                                tracing::debug!(
+                                    request_id,
+                                    trace_id = %trace_id,
+                                    attempt = retries_used + 1,
+                                    %peer,
+                                    backend = %backend.label,
+                                    error = %e2,
+                                    "failed to redial after stale pooled socket EOF"
+                                );
                                 write_error(&mut client, 503, idle).await;
                                 return Ok(());
                             }
@@ -326,6 +384,7 @@ where
                             &mut backend,
                             &mut failed_backends,
                             &mut retries_used,
+                            retry_deadline,
                         )
                         .await
                         {
@@ -334,7 +393,15 @@ where
                                 reused = fresh_reused;
                             }
                             Err(e2) => {
-                                tracing::debug!(%peer, backend = %backend.label, error = %e2, "failed to redial after stale pooled socket write error");
+                                tracing::debug!(
+                                    request_id,
+                                    trace_id = %trace_id,
+                                    attempt = retries_used + 1,
+                                    %peer,
+                                    backend = %backend.label,
+                                    error = %e2,
+                                    "failed to redial after stale pooled socket write error"
+                                );
                                 write_error(&mut client, 503, idle).await;
                                 return Ok(());
                             }
@@ -346,7 +413,15 @@ where
                             state.metrics.rejected("timeout");
                             write_error(&mut client, 504, idle).await;
                         }
-                        tracing::debug!(%peer, backend = %backend.label, error = %e, "failed to write request head");
+                        tracing::debug!(
+                            request_id,
+                            trace_id = %trace_id,
+                            attempt = retries_used + 1,
+                            %peer,
+                            backend = %backend.label,
+                            error = %e,
+                            "failed to write request head"
+                        );
                         return Ok(());
                     }
                 }
@@ -365,7 +440,15 @@ where
             .await
             {
                 state.metrics.client_errors_total.inc();
-                tracing::debug!(%peer, backend = %backend.label, error = %e, "failed to forward request body");
+                tracing::debug!(
+                    request_id,
+                    trace_id = %trace_id,
+                    attempt = retries_used + 1,
+                    %peer,
+                    backend = %backend.label,
+                    error = %e,
+                    "failed to forward request body"
+                );
                 break;
             }
             let request_done = Instant::now();
@@ -378,6 +461,7 @@ where
                 max_head,
                 timeouts,
                 deadline,
+                retry_deadline,
                 request_done,
                 &state.metrics,
                 &mut wrote_to_client,
@@ -399,6 +483,8 @@ where
                     .observe(request_start.elapsed().as_secs_f64());
                 tracing::debug!(
                     request_id,
+                    trace_id = %trace_id,
+                    attempts = retries_used + 1,
                     %peer,
                     backend = %backend.label,
                     method = %request.method,
@@ -426,7 +512,15 @@ where
                     .metrics
                     .stream_duration_seconds
                     .observe(request_start.elapsed().as_secs_f64());
-                tracing::debug!(request_id, %peer, backend = %backend.label, error = %e, "response failed");
+                tracing::debug!(
+                    request_id,
+                    trace_id = %trace_id,
+                    attempts = retries_used + 1,
+                    %peer,
+                    backend = %backend.label,
+                    error = %e,
+                    "response failed"
+                );
                 break;
             }
         }
@@ -441,6 +535,7 @@ async fn redial_or_failover(
     backend: &mut Arc<crate::backend::Backend>,
     failed_backends: &mut Vec<SocketAddr>,
     retries_used: &mut u32,
+    retry_deadline: Option<Instant>,
 ) -> anyhow::Result<(TcpStream, bool)> {
     let fresh_res = lease
         .as_mut()
@@ -458,20 +553,33 @@ async fn redial_or_failover(
             // Release the dead backend's active stream slot and concurrency
             // permit before sleeping or selecting a failover backend.
             *lease = None;
-            if *retries_used >= state.config.effective_max_retries() {
-                let reason = if first_err.kind() == io::ErrorKind::WouldBlock {
-                    "queue_full"
-                } else {
-                    "unhealthy"
-                };
+            let reason = if first_err.kind() == io::ErrorKind::WouldBlock {
+                "queue_full"
+            } else {
+                "unhealthy"
+            };
+            if *retries_used >= state.config.effective_max_retries()
+                || retry_deadline.is_some_and(|dl| Instant::now() >= dl)
+            {
                 state.metrics.rejected(reason);
                 return Err(first_err.into());
             }
+            let backoff = Duration::from_millis(20 * ((*retries_used + 1) as u64));
+            if let Some(dl) = retry_deadline {
+                if dl.saturating_duration_since(Instant::now()) < backoff {
+                    state.metrics.rejected(reason);
+                    return Err(first_err.into());
+                }
+            }
             *retries_used += 1;
-            let backoff_ms = 20 * (*retries_used as u64);
-            tokio::time::sleep(Duration::from_millis(backoff_ms)).await;
-            let (new_lease, conn, reused) =
-                super::l4::connect_tagged_with_budget(state, failed_backends, retries_used).await?;
+            tokio::time::sleep(backoff).await;
+            let (new_lease, conn, reused) = super::l4::connect_tagged_with_budget(
+                state,
+                failed_backends,
+                retries_used,
+                retry_deadline,
+            )
+            .await?;
             *backend = new_lease.backend().clone();
             *lease = Some(new_lease);
             Ok((conn, reused))
@@ -551,6 +659,7 @@ async fn forward_response<S>(
     max_head: usize,
     timeouts: &crate::config::TimeoutConfig,
     deadline: Instant,
+    retry_deadline: Option<Instant>,
     request_done: Instant,
     metrics: &Metrics,
     wrote_to_client: &mut bool,
@@ -595,6 +704,7 @@ where
         let interim = (100..200).contains(&parsed.status) && parsed.status != 101;
         if !interim
             && !*wrote_to_client
+            && retry_deadline.is_none_or(|dl| Instant::now() < dl)
             && reroute_statuses.is_some_and(|codes| codes.contains(&parsed.status))
         {
             let body = if request.method.eq_ignore_ascii_case("HEAD") {
