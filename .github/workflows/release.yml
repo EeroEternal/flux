@@ -91,11 +91,15 @@ jobs:
         uses: docker/setup-buildx-action@v3
 
       - name: Log in to GitHub Container Registry (ghcr.io)
+        # The workflow GITHUB_TOKEN cannot create or read the container package
+        # ("denied: permission_denied: read_package"), so a PAT with
+        # `write:packages` can be provided as the GHCR_TOKEN secret. It falls
+        # back to the GITHUB_TOKEN for repositories where the package is linked.
         uses: docker/login-action@v3
         with:
           registry: ghcr.io
           username: ${{ github.actor }}
-          password: ${{ secrets.GITHUB_TOKEN }}
+          password: ${{ secrets.GHCR_TOKEN || github.token }}
 
       - name: Log in to Docker Hub
         if: env.DOCKERHUB_TOKEN != ''
@@ -109,19 +113,39 @@ jobs:
         run: |
           VERSION="${GITHUB_REF_NAME#v}"
           DOCKERHUB_USER="${DOCKERHUB_USERNAME:-eeroeternal}"
-          TAGS="ghcr.io/eeroeternal/xlb:${VERSION},ghcr.io/eeroeternal/xlb:latest"
-          if [ -n "$DOCKERHUB_TOKEN" ]; then
-            TAGS="${TAGS},${DOCKERHUB_USER}/xlb:${VERSION},${DOCKERHUB_USER}/xlb:latest"
-          fi
-          echo "tags=${TAGS}" >> "$GITHUB_OUTPUT"
+          GHCR_OWNER="$(echo "$GITHUB_REPOSITORY_OWNER" | tr '[:upper:]' '[:lower:]')"
+          echo "version=${VERSION}" >> "$GITHUB_OUTPUT"
+          echo "dockerhub_user=${DOCKERHUB_USER}" >> "$GITHUB_OUTPUT"
+          echo "ghcr_owner=${GHCR_OWNER}" >> "$GITHUB_OUTPUT"
 
-      - name: Build and push Docker image
+      # The two registries are pushed separately: a permission problem on one
+      # registry (GHCR) must not abort the push to the other one (Docker Hub).
+      - name: Build and push Docker Hub image
         uses: docker/build-push-action@v6
         with:
           context: .
           platforms: linux/amd64,linux/arm64
           push: true
-          tags: ${{ steps.meta.outputs.tags }}
+          tags: |
+            docker.io/${{ steps.meta.outputs.dockerhub_user }}/xlb:${{ steps.meta.outputs.version }}
+            docker.io/${{ steps.meta.outputs.dockerhub_user }}/xlb:latest
+          build-args: |
+            CRATES_MIRROR=
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      - name: Build and push GHCR image
+        # Best effort: the GHCR push has been denied by the GITHUB_TOKEN since
+        # v0.0.4. Keep it out of the release's critical path.
+        continue-on-error: true
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          platforms: linux/amd64,linux/arm64
+          push: true
+          tags: |
+            ghcr.io/${{ steps.meta.outputs.ghcr_owner }}/xlb:${{ steps.meta.outputs.version }}
+            ghcr.io/${{ steps.meta.outputs.ghcr_owner }}/xlb:latest
           build-args: |
             CRATES_MIRROR=
           cache-from: type=gha
@@ -147,8 +171,16 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          gh release create "${{ github.ref_name }}" \
-            artifacts/*.tar.gz \
-            artifacts/*.sha256 \
-            --title "${{ github.ref_name }}" \
-            --generate-notes
+          TAG="${{ github.ref_name }}"
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            gh release upload "$TAG" \
+              artifacts/*.tar.gz \
+              artifacts/*.sha256 \
+              --clobber
+          else
+            gh release create "$TAG" \
+              artifacts/*.tar.gz \
+              artifacts/*.sha256 \
+              --title "$TAG" \
+              --generate-notes
+          fi
