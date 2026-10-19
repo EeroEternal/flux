@@ -1,6 +1,6 @@
 ---
 name: review
-description: Independent read-only code review (critic): execute in a separate session or read-only subagent, never self-review in the author context; run deterministic local gates before reading diffs, and output file:line findings with a SHIP or REWORK verdict. Use when reviewing a PR, a finished task, or before requesting human approval.
+description: "Independent read-only code review (critic): execute in a separate session or read-only subagent, never self-review in the author context; run deterministic local gates before reading diffs, and output file:line findings with a SHIP or REWORK verdict. Use when reviewing a PR, a finished task, or before requesting human approval."
 ---
 
 # Review (Independent Read-Only Critic)

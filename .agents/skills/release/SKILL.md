@@ -1,6 +1,6 @@
 ---
 name: release
-description: Full release promoter workflow for cutting a vX.Y.Z tag: run full local gates, verify version/changelog/docs, stop for explicit human approval, then tag and verify. Use before cutting any vX.Y.Z tag or production deploy.
+description: "Full release promoter workflow for cutting a vX.Y.Z tag: run full local gates, verify version/changelog/docs, stop for explicit human approval, then tag and verify. Use before cutting any vX.Y.Z tag or production deploy."
 ---
 
 # Release Promoter Process
