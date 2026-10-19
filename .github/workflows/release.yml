@@ -4,6 +4,14 @@ on:
   push:
     tags:
       - "v*.*.*"
+  # Re-publish an existing release (binaries, images, release page) without
+  # moving the tag: dispatch this workflow with the tag to publish.
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Release tag to publish, e.g. v0.0.9"
+        required: true
+        type: string
 
 permissions:
   contents: write
@@ -12,6 +20,11 @@ permissions:
 concurrency:
   group: release-${{ github.ref }}
   cancel-in-progress: true
+
+env:
+  # The tag being published: the pushed tag, or the one passed to a manual
+  # dispatch.
+  RELEASE_TAG: ${{ github.event.inputs.tag || github.ref_name }}
 
 jobs:
   build:
@@ -35,6 +48,8 @@ jobs:
             os: macos-14
     steps:
       - uses: actions/checkout@v4
+        with:
+          ref: ${{ env.RELEASE_TAG }}
 
       - name: Install musl tools (Linux)
         if: runner.os == 'Linux'
@@ -83,6 +98,8 @@ jobs:
       DOCKERHUB_USERNAME: ${{ secrets.DOCKERHUB_USERNAME }}
     steps:
       - uses: actions/checkout@v4
+        with:
+          ref: ${{ env.RELEASE_TAG }}
 
       - name: Set up QEMU
         uses: docker/setup-qemu-action@v3
@@ -111,7 +128,7 @@ jobs:
       - name: Compute image tags
         id: meta
         run: |
-          VERSION="${GITHUB_REF_NAME#v}"
+          VERSION="${RELEASE_TAG#v}"
           DOCKERHUB_USER="${DOCKERHUB_USERNAME:-eeroeternal}"
           GHCR_OWNER="$(echo "$GITHUB_REPOSITORY_OWNER" | tr '[:upper:]' '[:lower:]')"
           echo "version=${VERSION}" >> "$GITHUB_OUTPUT"
@@ -171,7 +188,7 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          TAG="${{ github.ref_name }}"
+          TAG="${RELEASE_TAG}"
           if gh release view "$TAG" >/dev/null 2>&1; then
             gh release upload "$TAG" \
               artifacts/*.tar.gz \
