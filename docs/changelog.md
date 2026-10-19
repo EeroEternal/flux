@@ -10,6 +10,8 @@ Write bullets that a human can ship from: **what changed**, **who it affects**,
 
 ## [Unreleased]
 
+## [0.0.9] - 2026-10-19
+
 ### Added
 
 - **Non-idempotent retry boundary (`retry.non_idempotent_retry_statuses`, `retry.respect_idempotency_key`, `src/config.rs`, `src/proxy/l7.rs`)**: a `500`/`502`/`504` can arrive *after* an upstream gateway already accepted and started executing (and billing) a non-idempotent `POST`. Operators can now set `retry.non_idempotent_retry_statuses` (e.g. `[402, 404, 429, 503]`) so `POST`/`PUT`/`PATCH`/`DELETE` reroute only on unambiguous pre-execution refusals, while safe methods (`GET`, `HEAD`, `OPTIONS`, `TRACE`) keep using `retry.retry_statuses`. With `retry.respect_idempotency_key = true`, requests carrying a non-empty `Idempotency-Key` / `X-Idempotency-Key` may reroute on the full status list (default `false`: heterogeneous gateways do not share a deduplication ledger). Until the narrower list is configured, non-idempotent requests keep the default behaviour and are still replayed on in-doubt `5xx`. Breaking: No.
