@@ -265,8 +265,11 @@ pub struct RequestHead {
 
 impl RequestHead {
     /// True for read-only / safe HTTP methods (`GET`, `HEAD`, `OPTIONS`,
-    /// `TRACE`) that can be retried across backends without side effects.
-    pub fn is_idempotent_method(&self) -> bool {
+    /// `TRACE`) whose replay cannot cause side effects. `PUT` and `DELETE` are
+    /// idempotent per RFC 9110 but are deliberately treated as unsafe here:
+    /// xLB cannot know whether the upstream already executed them, so they
+    /// follow the `retry.non_idempotent_retry_statuses` policy.
+    pub fn is_safe_method(&self) -> bool {
         self.method.eq_ignore_ascii_case("GET")
             || self.method.eq_ignore_ascii_case("HEAD")
             || self.method.eq_ignore_ascii_case("OPTIONS")
@@ -301,6 +304,11 @@ fn has_non_empty_header(headers: &[httparse::Header<'_>], name: &str) -> bool {
 /// Sanitize a correlation header value for structured logs so secret tokens
 /// accidentally passed in `X-Request-Id` / `X-Correlation-Id` are redacted and
 /// log injection / unbounded strings are prevented.
+///
+/// The redaction is a prefix heuristic (`sk-`, `rk-`, `ak-`) plus "contains
+/// whitespace", which also covers `Bearer <token>` and `Basic <token>`. It is
+/// not a secret scanner: an opaque token without whitespace and without those
+/// prefixes is logged as-is.
 pub fn sanitize_trace_id(raw: &[u8]) -> Option<String> {
     let trimmed = raw.trim_ascii();
     if trimmed.is_empty() {
@@ -311,8 +319,6 @@ pub fn sanitize_trace_id(raw: &[u8]) -> Option<String> {
     if lower.starts_with("sk-")
         || lower.starts_with("rk-")
         || lower.starts_with("ak-")
-        || lower.starts_with("bearer ")
-        || lower.starts_with("basic ")
         || text.bytes().any(|b| b.is_ascii_whitespace())
     {
         return Some("<redacted>".to_string());
@@ -1045,7 +1051,7 @@ mod tests {
         let get_req =
             parse_request(b"GET /v1/models HTTP/1.1\r\nHost: x\r\nX-Request-Id: req-123:a\r\n\r\n")
                 .unwrap();
-        assert!(get_req.is_idempotent_method());
+        assert!(get_req.is_safe_method());
         assert!(!get_req.has_idempotency_key);
         assert_eq!(get_req.trace_id.as_deref(), Some("req-123:a"));
 
@@ -1053,7 +1059,7 @@ mod tests {
             b"POST /v1/chat/completions HTTP/1.1\r\nHost: x\r\nIdempotency-Key: idem-42\r\nX-Correlation-Id: sk-secret-token-value\r\n\r\n",
         )
         .unwrap();
-        assert!(!post_req.is_idempotent_method());
+        assert!(!post_req.is_safe_method());
         assert!(post_req.has_idempotency_key);
         assert_eq!(post_req.trace_id.as_deref(), Some("<redacted>"));
 
@@ -1068,7 +1074,7 @@ mod tests {
         let raw =
             format!("DELETE /v1/files/1 HTTP/1.1\r\nHost: x\r\nX-Request-Id: {long_id}\r\n\r\n");
         let del_req = parse_request(raw.as_bytes()).unwrap();
-        assert!(!del_req.is_idempotent_method());
+        assert!(!del_req.is_safe_method());
         assert_eq!(del_req.trace_id.as_deref().map(str::len), Some(64));
     }
 }

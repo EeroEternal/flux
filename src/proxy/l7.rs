@@ -180,7 +180,7 @@ where
         let effective_statuses = state
             .config
             .retry
-            .effective_retry_statuses(request.is_idempotent_method(), request.has_idempotency_key);
+            .effective_retry_statuses(request.is_safe_method(), request.has_idempotency_key);
 
         let mut wrote_to_client = false;
         let resp_result = if inline_body.is_some() {
@@ -558,16 +558,18 @@ async fn redial_or_failover(
             } else {
                 "unhealthy"
             };
-            if *retries_used >= state.config.effective_max_retries()
-                || retry_deadline.is_some_and(|dl| Instant::now() >= dl)
-            {
+            if *retries_used >= state.config.effective_max_retries() {
                 state.metrics.rejected(reason);
+                return Err(first_err.into());
+            }
+            if retry_deadline.is_some_and(|dl| Instant::now() >= dl) {
+                state.metrics.rejected("retry_timeout");
                 return Err(first_err.into());
             }
             let backoff = Duration::from_millis(20 * ((*retries_used + 1) as u64));
             if let Some(dl) = retry_deadline {
                 if dl.saturating_duration_since(Instant::now()) < backoff {
-                    state.metrics.rejected(reason);
+                    state.metrics.rejected("retry_timeout");
                     return Err(first_err.into());
                 }
             }

@@ -91,6 +91,15 @@ fn find(haystack: &[u8], needle: &[u8]) -> Option<usize> {
     haystack.windows(needle.len()).position(|w| w == needle)
 }
 
+/// Bind a TCP listener and drop it again, returning an address that refuses
+/// connections (used to simulate a dead backend).
+async fn dead_addr() -> SocketAddr {
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    drop(listener);
+    addr
+}
+
 /// A backend that echoes every byte it receives.
 fn echo_backend() -> Handler {
     Arc::new(|mut socket| {
@@ -2173,8 +2182,9 @@ respect_idempotency_key = false
     );
     assert_eq!(b_hits.load(Ordering::SeqCst), 3);
 
-    // 1d. Next RR lands on Backend A (since reroute used select_skipping without
-    // advancing RR cursor, or let's verify GET /v1/models hitting 502 reroutes to B):
+    // 1d. The next request lands on Backend A again (the status reroute used
+    // `select_skipping` and did not consume the round-robin cursor), so the
+    // safe GET hits A's 502 and reroutes to Backend B.
     client
         .send(b"GET /v1/models HTTP/1.1\r\nHost: xlb\r\n\r\n")
         .await;
@@ -2321,6 +2331,148 @@ retry_statuses = [503]
         b_hits.load(Ordering::SeqCst),
         0,
         "must not reroute to Backend B after retry.timeout ceiling"
+    );
+    drop(client);
+    server.stop().await;
+}
+
+#[tokio::test]
+async fn thin_l7_retry_timeout_stops_connect_failover() {
+    let b_conns = Arc::new(AtomicUsize::new(0));
+
+    // Backend B is healthy but must never be reached: the connect failure on
+    // the dead backend A already exhausts the (tiny) retry budget.
+    let handler_b: Handler = Arc::new(|mut socket| {
+        Box::pin(async move {
+            let mut buf = Vec::new();
+            if read_http_head(&mut socket, &mut buf).await.is_some() {
+                let _ = socket
+                    .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 7\r\n\r\nfrom-b!")
+                    .await;
+            }
+        })
+    });
+    let b_addr = spawn_backend(handler_b, b_conns.clone()).await;
+    let dead = dead_addr().await;
+
+    let cfg = format!(
+        r#"
+[server]
+bind = "127.0.0.1:0"
+mode = "thin-l7"
+
+[timeouts]
+connect = "2s"
+idle = "3s"
+total = "10s"
+
+[backends]
+algorithm = "roundrobin"
+health_interval = "0s"
+
+[[backends.servers]]
+addr = "{dead}"
+weight = 1
+
+[[backends.servers]]
+addr = "{b_addr}"
+weight = 1
+
+[retry]
+max_retries = 1
+timeout = "1ms"
+retry_statuses = [503]
+"#
+    );
+    let server = XlbServer::start(Config::from_toml(&cfg).unwrap())
+        .await
+        .unwrap();
+    let mut client = TestClient::connect(server.addr).await;
+    client
+        .send(b"POST /v1/chat HTTP/1.1\r\nHost: xlb\r\nContent-Length: 2\r\n\r\n{}")
+        .await;
+    let resp = client.read_response().await;
+    assert!(
+        resp.contains("503 Service Unavailable"),
+        "expected 503 after the retry budget was exhausted, got: {resp}"
+    );
+    assert_eq!(
+        b_conns.load(Ordering::SeqCst),
+        0,
+        "must not fail over to Backend B after retry.timeout ceiling"
+    );
+    drop(client);
+    server.stop().await;
+}
+
+#[tokio::test]
+async fn l4_retry_timeout_stops_connect_failover() {
+    let b_conns = Arc::new(AtomicUsize::new(0));
+
+    let handler_b: Handler = Arc::new(|mut socket| {
+        Box::pin(async move {
+            let mut buf = [0u8; 1024];
+            loop {
+                match socket.read(&mut buf).await {
+                    Ok(0) | Err(_) => return,
+                    Ok(n) => {
+                        if socket.write_all(&buf[..n]).await.is_err() {
+                            return;
+                        }
+                    }
+                }
+            }
+        })
+    });
+    let b_addr = spawn_backend(handler_b, b_conns.clone()).await;
+    let dead = dead_addr().await;
+
+    let cfg = format!(
+        r#"
+[server]
+bind = "127.0.0.1:0"
+mode = "l4"
+
+[timeouts]
+connect = "2s"
+idle = "3s"
+total = "10s"
+
+[backends]
+algorithm = "roundrobin"
+health_interval = "0s"
+
+[[backends.servers]]
+addr = "{dead}"
+weight = 1
+
+[[backends.servers]]
+addr = "{b_addr}"
+weight = 1
+
+[retry]
+max_retries = 1
+timeout = "1ms"
+"#
+    );
+    let server = XlbServer::start(Config::from_toml(&cfg).unwrap())
+        .await
+        .unwrap();
+    let mut client = TestClient::connect(server.addr).await;
+    client.send(b"hello").await;
+    let mut buf = [0u8; 64];
+    // xLB closes the client socket without reading the pending bytes, so the
+    // client may observe either a clean EOF or a reset.
+    let n = match client.stream.read(&mut buf).await {
+        Ok(n) => n,
+        Err(e) if e.kind() == std::io::ErrorKind::ConnectionReset => 0,
+        Err(e) => panic!("unexpected read error: {e}"),
+    };
+    assert_eq!(n, 0, "expected the client connection to be closed");
+    assert_eq!(
+        b_conns.load(Ordering::SeqCst),
+        0,
+        "must not fail over to Backend B after retry.timeout ceiling"
     );
     drop(client);
     server.stop().await;

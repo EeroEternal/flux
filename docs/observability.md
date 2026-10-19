@@ -15,7 +15,7 @@ Every metric is exposed on `GET /metrics` (default bind `0.0.0.0:9106`).
 | `xlb_conn_new_total{backend}` | counter | Connections freshly dialed |
 | `xlb_conn_dial_errors_total{backend}` | counter | Failed backend dials |
 | `xlb_reroutes_total{backend,status}` | counter | Pre-first-byte HTTP status reroutes to another healthy backend (`thin-l7`) |
-| `xlb_rejected_total{reason}` | counter | Rejected requests (`unhealthy`, `queue_full`, `timeout`, `bad_request`) |
+| `xlb_rejected_total{reason}` | counter | Rejected requests (`unhealthy`, `queue_full`, `timeout`, `bad_request`, `retry_timeout`) |
 | `xlb_health_check_failures{backend}` | counter | Failed active `/health` probes |
 | `xlb_health_check_success_total{backend}` | counter | Successful active `/health` probes |
 | `xlb_backend_healthy{backend}` | gauge | `1` healthy / `0` unhealthy |
@@ -31,6 +31,9 @@ Logs are emitted via `tracing`:
 
 - Set `RUST_LOG=info` (or `debug` / `xlb=trace`) to control log verbosity.
 - Set `XLB_LOG_JSON=1` to emit JSON lines for log collectors.
+- Per-request correlation (`request_id`, `trace_id`, `attempt` / `attempts`) is
+  emitted at `debug` level; use `RUST_LOG=xlb=debug` to audit multi-attempt
+  executions across backends.
 
 ## Verifying TTFT & Connection Pool Reuse
 

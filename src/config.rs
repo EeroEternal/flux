@@ -241,7 +241,9 @@ pub struct RetryConfig {
     pub max_retries: i32,
     /// Optional wall-clock ceiling across all retry/reroute attempts before the
     /// first response byte is written to the client. Must be `> 0s` and
-    /// `<= timeouts.total`.
+    /// `<= timeouts.total`. The budget starts when the request arrives, so
+    /// time spent reading the request head and the request body counts against
+    /// it.
     #[serde(default, deserialize_with = "duration::deserialize_opt")]
     pub timeout: Option<Duration>,
     /// HTTP status codes that trigger pre-first-byte rerouting to another
@@ -253,6 +255,8 @@ pub struct RetryConfig {
     /// `[402, 404, 429, 503]` to reroute only unambiguous pre-execution
     /// refusals while avoiding automatic cross-node replay on in-doubt `500`,
     /// `502`, or `504` responses that may occur after upstream acceptance.
+    /// When unset, non-idempotent requests use `retry_statuses` (i.e. they are
+    /// still replayed on in-doubt `5xx`).
     #[serde(default)]
     pub non_idempotent_retry_statuses: Option<Vec<u16>>,
     /// When `true`, non-idempotent requests carrying an `Idempotency-Key` or
@@ -271,14 +275,20 @@ pub struct RetryConfig {
 }
 
 impl RetryConfig {
-    /// Status codes eligible for pre-first-byte rerouting given request method
-    /// idempotency and presence of an idempotency key header.
+    /// Status codes eligible for pre-first-byte rerouting given the request
+    /// method class and presence of an idempotency key header.
+    ///
+    /// Safe methods (`GET`, `HEAD`, `OPTIONS`, `TRACE`) always use
+    /// `retry_statuses`. Non-idempotent methods use
+    /// `non_idempotent_retry_statuses` when it is configured, unless
+    /// `respect_idempotency_key` is enabled and the request carries an
+    /// idempotency key.
     pub fn effective_retry_statuses(
         &self,
-        is_idempotent_method: bool,
+        is_safe_method: bool,
         has_idempotency_key: bool,
     ) -> &[u16] {
-        if is_idempotent_method || (self.respect_idempotency_key && has_idempotency_key) {
+        if is_safe_method || (self.respect_idempotency_key && has_idempotency_key) {
             &self.retry_statuses
         } else if let Some(ref statuses) = self.non_idempotent_retry_statuses {
             statuses.as_slice()

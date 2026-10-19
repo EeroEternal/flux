@@ -13,7 +13,7 @@ xLB is directly inspired by **HAProxy's core philosophy**: a load balancer shoul
 However, traditional load balancers and Ingress controllers were designed around short, idempotent web traffic, whereas AI inference traffic is almost entirely **long-lived, non-idempotent streaming `POST`s** (`POST /v1/chat/completions`). We built xLB in Rust to make AI streaming a first-class default rather than a fragile tuning exercise:
 
 - **Aggressive `POST` connection pooling without payload inspection** — Traditional proxies (such as HAProxy's default `http-reuse safe`) avoid pooling backend connections across clients for non-idempotent `POST`s, while pure L4 proxies pin a client connection to one backend for its entire lifetime. xLB's `thin-l7` mode parses only HTTP/1.1 framing boundaries (`Content-Length` / chunked end) so every completed `POST` stream immediately returns its backend socket to a shared LIFO pool.
-- **Timeouts and retries shaped for LLM inference** — LLM workloads have distinct phases: *dial (`connect`) → prefill wait (`first_byte`) → reasoning pauses (`idle`) → multi-minute generation (`total`)*. xLB enforces this layered timeout hierarchy natively, bounds retries by both attempt count (`retry.max_retries`) and total retry wall-clock budget (`retry.timeout`), and can distinguish unambiguous pre-execution refusals (`402`/`404`/`429`/`503`) from in-doubt post-acceptance errors (`500`/`502`/`504`) via `retry.non_idempotent_retry_statuses` and `retry.respect_idempotency_key`.
+- **Timeouts and retries shaped for LLM inference** — LLM workloads have distinct phases: *dial (`connect`) → prefill wait (`first_byte`) → reasoning pauses (`idle`) → multi-minute generation (`total`)*. xLB enforces this layered timeout hierarchy natively, bounds retries by both attempt count (`retry.max_retries`) and total retry wall-clock budget (`retry.timeout`), and can distinguish unambiguous pre-execution refusals (`402`/`404`/`429`/`503`) from in-doubt post-acceptance errors (`500`/`502`/`504`) via `retry.non_idempotent_retry_statuses` and `retry.respect_idempotency_key`. Note that until `retry.non_idempotent_retry_statuses` is set, non-idempotent requests keep the default `retry.retry_statuses` list and are therefore still replayed on in-doubt `500`/`502`/`504`.
 - **Built-in TTFT attribution & zero-buffering** — General L7 proxies (Nginx, Envoy) often buffer bodies unless explicitly disabled per route. xLB streams response bodies in fixed 16 KiB chunks with zero aggregation and natively tracks `xlb_ttft_delta_ms` (the exact first-byte latency added by the proxy itself).
 - **Decoupled from gateway lifecycles & model catalogs** — Keeps TLS termination, connection pooling, `/health` hysteresis, and pre-first-byte HTTP status rerouting out of the gateway process so LiteLLM, `xlite`, New API, or AISIX instances can scale, restart, or serve disjoint model subsets without dropping active streams or sharing a model catalog.
 
@@ -58,9 +58,15 @@ servers = [
 
 [retry]
 max_retries = -1          # -1 (default) = try all remaining healthy backends; 0 = disabled
+# timeout = "15s"         # optional wall-clock budget for all pre-first-byte retries (<= timeouts.total, starts at request arrival)
 retry_statuses = [402, 404, 429, 500, 502, 503, 504]
 # non_idempotent_retry_statuses = [402, 404, 429, 503]  # optional: avoid replaying paid POSTs on in-doubt 500/502/504
+# respect_idempotency_key = false  # set true only when upstreams share a deduplication ledger for Idempotency-Key / X-Idempotency-Key
 ```
+
+Per-request correlation (`request_id`, `trace_id`, `attempt`) is logged at `debug`
+level — enable it with `RUST_LOG=xlb=debug` to audit multi-attempt executions
+across backends.
 
 ## Gateway Compatibility
 

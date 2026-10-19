@@ -136,7 +136,11 @@ the backend's first byte) or `idle` (afterwards). The splice is then cancelled.
   written to the client**, bounded by `retry.max_retries` (default `-1`, which
   expands to `backends.servers.len() - 1` so every healthy backend can be tried
   at most once; `0` disables retries) and optional wall-clock ceiling
-  `retry.timeout` (`0 < retry.timeout <= timeouts.total`).
+  `retry.timeout` (`0 < retry.timeout <= timeouts.total`). The ceiling is
+  anchored at request arrival, so time spent reading the request head and the
+  request body counts against it; in `l4` mode it bounds the connect-retry
+  loop, in `thin-l7` it bounds connect retries, stale-socket failovers and
+  status reroutes together.
 - In `thin-l7` (the default `server.mode`), fixed-length request bodies up to
   `retry.max_body_bytes` (default `64 MiB`) are buffered before checking out a
   backend connection and freed immediately once final response headers are
@@ -160,6 +164,8 @@ the backend's first byte) or `idle` (afterwards). The splice is then cancelled.
     `X-Request-Id` / `X-Correlation-Id` (redacting secret prefixes such as
     `sk-` or `Bearer ` and falling back to `xlb-{request_id}`) plus the attempt
     counter so operators can correlate multi-attempt executions across nodes.
+    These events are emitted at `debug` level: enable them with
+    `RUST_LOG=xlb=debug`.
 
 ## Invariants (must hold after any change)
 

@@ -340,6 +340,7 @@ pub(crate) async fn connect_tagged_with_budget(
     retry_deadline: Option<Instant>,
 ) -> anyhow::Result<(Lease, TcpStream, bool)> {
     let max_retries = state.config.effective_max_retries();
+    let mut budget_exhausted = false;
     let last_error = loop {
         let mut lease = match state.scheduler.select_skipping(failed_backends) {
             Some(lease) => lease,
@@ -359,14 +360,17 @@ pub(crate) async fn connect_tagged_with_budget(
                 if !failed_backends.contains(&addr) {
                     failed_backends.push(addr);
                 }
-                if *retries_used >= max_retries
-                    || retry_deadline.is_some_and(|dl| Instant::now() >= dl)
-                {
+                if *retries_used >= max_retries {
+                    break e;
+                }
+                if retry_deadline.is_some_and(|dl| Instant::now() >= dl) {
+                    budget_exhausted = true;
                     break e;
                 }
                 let backoff = Duration::from_millis(20 * ((*retries_used + 1) as u64));
                 if let Some(dl) = retry_deadline {
                     if dl.saturating_duration_since(Instant::now()) < backoff {
+                        budget_exhausted = true;
                         break e;
                     }
                 }
@@ -375,7 +379,9 @@ pub(crate) async fn connect_tagged_with_budget(
             }
         }
     };
-    let reason = if last_error.kind() == io::ErrorKind::WouldBlock {
+    let reason = if budget_exhausted {
+        "retry_timeout"
+    } else if last_error.kind() == io::ErrorKind::WouldBlock {
         "queue_full"
     } else {
         "unhealthy"
