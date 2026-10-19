@@ -31,6 +31,7 @@ idle_timeout = "60s"
 [backends]
 algorithm = "leastconn"        # leastconn | roundrobin
 health_check_path = "/health"
+# health_check_headers = ["Authorization: Bearer sk-..."]  # extra probe headers for an auth-protected health_check_path (e.g. LiteLLM /health; see docs/gateways.md)
 health_interval = "2s"
 health_check_timeout = "2s"
 unhealthy_threshold = 2

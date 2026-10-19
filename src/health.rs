@@ -15,6 +15,7 @@ use tokio::net::TcpStream;
 pub fn spawn_all(
     backends: Vec<Arc<Backend>>,
     path: String,
+    headers: Vec<String>,
     interval: Duration,
     probe_timeout: Duration,
     metrics: Arc<Metrics>,
@@ -27,6 +28,7 @@ pub fn spawn_all(
     let mut handles = Vec::new();
     for backend in backends {
         let path = path.clone();
+        let headers = headers.clone();
         let metrics = metrics.clone();
         let mut shutdown = shutdown.clone();
         handles.push(tokio::spawn(async move {
@@ -37,7 +39,7 @@ pub fn spawn_all(
                 tokio::select! {
                     _ = shutdown.changed() => break,
                     _ = ticker.tick() => {
-                        let ok = probe(&backend, &path, probe_timeout).await;
+                        let ok = probe(&backend, &path, &headers, probe_timeout).await;
                         if ok {
                             metrics
                                 .health_check_success_total
@@ -53,16 +55,9 @@ pub fn spawn_all(
     handles
 }
 
-async fn probe(backend: &Backend, path: &str, probe_timeout: Duration) -> bool {
+async fn probe(backend: &Backend, path: &str, headers: &[String], probe_timeout: Duration) -> bool {
     let addr = backend.addr;
-    let path = if path.starts_with('/') {
-        path.to_string()
-    } else {
-        format!("/{path}")
-    };
-    let request = format!(
-        "GET {path} HTTP/1.1\r\nHost: {addr}\r\nConnection: close\r\nUser-Agent: xlb-health\r\n\r\n"
-    );
+    let request = probe_request(path, addr, headers);
     let result = tokio::time::timeout(probe_timeout, async move {
         let mut socket = TcpStream::connect(addr).await?;
         socket.set_nodelay(true)?;
@@ -74,6 +69,23 @@ async fn probe(backend: &Backend, path: &str, probe_timeout: Duration) -> bool {
     })
     .await;
     matches!(result, Ok(Ok(true)))
+}
+
+fn probe_request(path: &str, addr: std::net::SocketAddr, headers: &[String]) -> String {
+    let path = if path.starts_with('/') {
+        path.to_string()
+    } else {
+        format!("/{path}")
+    };
+    let mut request = format!(
+        "GET {path} HTTP/1.1\r\nHost: {addr}\r\nConnection: close\r\nUser-Agent: xlb-health\r\n"
+    );
+    for header in headers {
+        request.push_str(header);
+        request.push_str("\r\n");
+    }
+    request.push_str("\r\n");
+    request
 }
 
 fn status_is_ok(response: &[u8]) -> bool {
@@ -90,6 +102,23 @@ fn status_is_ok(response: &[u8]) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn probe_request_includes_configured_headers() {
+        let addr = "127.0.0.1:4000".parse().unwrap();
+        let request = probe_request(
+            "/health",
+            addr,
+            &["Authorization: Bearer sk-test".to_string()],
+        );
+        assert!(request.starts_with("GET /health HTTP/1.1\r\n"));
+        assert!(request.contains("\r\nAuthorization: Bearer sk-test\r\n"));
+        assert!(request.ends_with("\r\n\r\n"));
+        assert_eq!(
+            probe_request("health", addr, &[]),
+            probe_request("/health", addr, &[])
+        );
+    }
 
     #[test]
     fn status_parsing() {

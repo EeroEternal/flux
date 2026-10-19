@@ -10,6 +10,10 @@ Write bullets that a human can ship from: **what changed**, **who it affects**,
 
 ## [Unreleased]
 
+### Added
+
+- **Configurable health-probe headers (`backends.health_check_headers`, `src/config.rs`, `src/health.rs`)**: extra `Name: value` lines (e.g. `["Authorization: Bearer sk-..."]`) are sent on every active probe, so a gateway whose health endpoint requires auth — LiteLLM's `/health` returns `401` once `LITELLM_MASTER_KEY` is set — can be health-checked for real instead of being ejected as unhealthy. Entries containing CR/LF or lacking a `:` are rejected at startup. Default `[]` keeps probe bytes unchanged. Breaking: No.
+
 ## [0.0.8] - 2026-10-17
 
 ### Changed

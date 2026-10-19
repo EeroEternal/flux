@@ -160,6 +160,10 @@ pub struct BackendsConfig {
     /// Lightweight health endpoint probed by xLB.
     #[serde(default = "default_health_path")]
     pub health_check_path: String,
+    /// Extra `Name: value` header lines sent on every health probe. Needed for
+    /// gateways whose `/health` requires auth (e.g. LiteLLM with a master key).
+    #[serde(default)]
+    pub health_check_headers: Vec<String>,
     /// Probe interval. Set to `"0s"` to disable active health checking.
     #[serde(
         deserialize_with = "duration::deserialize",
@@ -342,6 +346,14 @@ impl Config {
             anyhow::bail!(
                 "backends.eject_cooldown must be greater than zero when passive_unhealthy_threshold > 0"
             );
+        }
+        for header in &self.backends.health_check_headers {
+            if header.contains(['\r', '\n']) || !header.contains(':') {
+                anyhow::bail!(
+                    "invalid backends.health_check_headers entry (expected `Name: value`, no CR/LF): {:?}",
+                    header
+                );
+            }
         }
         if self.server.tls.enabled
             && (self.server.tls.cert.is_none() || self.server.tls.key.is_none())
@@ -537,6 +549,32 @@ acquire_timeout = "0s"
 addr = "127.0.0.1:8001"
 "#;
         assert!(Config::from_toml(zero).is_err());
+    }
+
+    #[test]
+    fn validates_health_check_headers() {
+        let cfg = |headers: &str| {
+            format!(
+                r#"
+[server]
+bind = "0.0.0.0:8006"
+[backends]
+health_check_headers = [{headers}]
+[[backends.servers]]
+addr = "127.0.0.1:8001"
+"#
+            )
+        };
+        assert!(Config::from_toml(&cfg(r#""Authorization: Bearer sk-x""#)).is_ok());
+        assert_eq!(
+            Config::from_toml(&cfg(r#""Authorization: Bearer sk-x""#))
+                .unwrap()
+                .backends
+                .health_check_headers,
+            vec!["Authorization: Bearer sk-x".to_string()]
+        );
+        assert!(Config::from_toml(&cfg(r#""X-Evil: y\r\nInjected: z""#)).is_err());
+        assert!(Config::from_toml(&cfg(r#""NoColonHeader""#)).is_err());
     }
 
     #[test]

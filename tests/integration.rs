@@ -459,6 +459,105 @@ async fn thin_l7_survives_backend_disconnect() {
     server.stop().await;
 }
 
+/// A gateway whose health endpoint requires auth (e.g. LiteLLM `/health` with a
+/// master key) is only schedulable when `backends.health_check_headers` carries
+/// the credential; without it the probe gets 401 and the backend is ejected.
+#[tokio::test]
+async fn health_probe_sends_configured_headers() {
+    let conns = Arc::new(AtomicUsize::new(0));
+    let handler: Handler = Arc::new(|mut socket| {
+        Box::pin(async move {
+            let mut buf = Vec::new();
+            let Some(head) = read_http_head(&mut socket, &mut buf).await else {
+                return;
+            };
+            let text = String::from_utf8_lossy(&head).into_owned();
+            let authed = text.contains("Authorization: Bearer sk-probe");
+            let response = if text.starts_with("GET /health") && !authed {
+                "HTTP/1.1 401 Unauthorized\r\nContent-Length: 0\r\n\r\n"
+            } else {
+                "HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nok"
+            };
+            let _ = socket.write_all(response.as_bytes()).await;
+        })
+    });
+    let backend = spawn_backend(handler, conns.clone()).await;
+
+    let start = |headers: &str| {
+        let text = format!(
+            r#"
+[server]
+bind = "127.0.0.1:0"
+mode = "thin-l7"
+
+[backends]
+health_check_path = "/health"
+health_interval = "1s"
+health_check_timeout = "1s"
+unhealthy_threshold = 2
+healthy_threshold = 1
+{headers}
+[[backends.servers]]
+addr = "{backend}"
+weight = 1
+
+[metrics]
+enabled = false
+"#
+        );
+        Config::from_toml(&text).unwrap()
+    };
+
+    async fn status(addr: SocketAddr) -> String {
+        let mut client = TcpStream::connect(addr).await.unwrap();
+        client
+            .write_all(b"GET /v1/models HTTP/1.1\r\nHost: xlb\r\n\r\n")
+            .await
+            .unwrap();
+        let mut buf = Vec::new();
+        let head = tokio::time::timeout(
+            Duration::from_secs(3),
+            read_http_head(&mut client, &mut buf),
+        )
+        .await
+        .expect("proxy hung")
+        .expect("no response");
+        String::from_utf8_lossy(&head)
+            .lines()
+            .next()
+            .unwrap_or_default()
+            .to_string()
+    }
+
+    // Probe credential configured: stays schedulable across several probe rounds.
+    let server = XlbServer::start(start(
+        "health_check_headers = [\"Authorization: Bearer sk-probe\"]",
+    ))
+    .await
+    .unwrap();
+    tokio::time::sleep(Duration::from_millis(2600)).await;
+    assert!(status(server.addr).await.contains(" 200 "));
+    server.stop().await;
+
+    // Without it the 401 probes eject the backend and clients see 503.
+    let server = XlbServer::start(start("health_check_headers = []"))
+        .await
+        .unwrap();
+    let mut statuses = String::new();
+    for _ in 0..40 {
+        statuses = status(server.addr).await;
+        if statuses.contains(" 503 ") {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(150)).await;
+    }
+    assert!(
+        statuses.contains(" 503 "),
+        "expected ejection, got {statuses}"
+    );
+    server.stop().await;
+}
+
 #[tokio::test]
 async fn l4_schedules_least_connections() {
     let conns = Arc::new(AtomicUsize::new(0));

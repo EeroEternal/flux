@@ -66,6 +66,7 @@ impl XlbServer {
         handles.extend(health::spawn_all(
             state.scheduler.backends().to_vec(),
             config.backends.health_check_path.clone(),
+            config.backends.health_check_headers.clone(),
             config.backends.health_interval,
             config.backends.health_check_timeout,
             metrics.clone(),
